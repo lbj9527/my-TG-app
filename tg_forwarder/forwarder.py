@@ -203,6 +203,9 @@ class MessageForwarder:
         if current_media_group:
             grouped_messages.append(("media_group", current_media_group))
         
+        # 存储所有转发的消息
+        forwarded_messages = defaultdict(list)
+        
         # 处理分组后的消息
         for msg_type, msg_data in grouped_messages:
             try:
@@ -210,6 +213,10 @@ class MessageForwarder:
                     # 转发媒体组
                     media_group = msg_data
                     result = await self.forward_media_group(media_group, valid_targets)
+                    
+                    # 将转发结果添加到forwarded_messages
+                    for target, messages in result.items():
+                        forwarded_messages[target].extend(messages)
                     
                     success = any(bool(msgs) for msgs in result.values())
                     stats["processed"] += len(media_group)
@@ -226,6 +233,10 @@ class MessageForwarder:
                     # 转发单条消息
                     message = msg_data
                     result = await self.forward_message(message, valid_targets)
+                    
+                    # 将转发结果添加到forwarded_messages
+                    for target, messages in result.items():
+                        forwarded_messages[target].extend(messages)
                     
                     success = any(bool(msgs) for msgs in result.values())
                     stats["processed"] += 1
@@ -256,6 +267,9 @@ class MessageForwarder:
         stats["end_time"] = time.time()
         stats["duration"] = stats["end_time"] - stats["start_time"]
         stats["success"] = True
+        
+        # 添加转发消息列表到结果中
+        stats["forwarded_messages"] = dict(forwarded_messages)
         
         logger.info(f"消息处理完成: 总数 {stats['total']}, 处理 {stats['processed']}, 成功 {stats['success']}, 失败 {stats['failed']}, 跳过 {stats['skipped']}")
         logger.info(f"耗时: {stats['duration']:.2f}秒")

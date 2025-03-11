@@ -133,4 +133,24 @@ class Config:
             'file': self.config.get('LOG', 'file', fallback='logs/app.log'),
         }
         
-        return log_config 
+        return log_config
+    
+    def get_download_config(self) -> Dict[str, Any]:
+        """获取下载配置"""
+        download_config = {
+            'temp_folder': './temp',
+            'timeout': 300,
+            'enabled': False
+        }
+        
+        if 'DOWNLOAD' in self.config:
+            if 'temp_folder' in self.config['DOWNLOAD']:
+                download_config['temp_folder'] = self.config['DOWNLOAD']['temp_folder']
+            
+            if 'timeout' in self.config['DOWNLOAD']:
+                download_config['timeout'] = self.config['DOWNLOAD'].getint('timeout')
+                
+            if 'enabled' in self.config['DOWNLOAD']:
+                download_config['enabled'] = self.config['DOWNLOAD'].getboolean('enabled')
+        
+        return download_config 

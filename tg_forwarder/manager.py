@@ -48,6 +48,11 @@ class ForwardManager:
         media_config = self.config.get_media_config()
         self.media_handler = MediaHandler(self.client, media_config)
         
+        # 初始化下载器
+        from tg_forwarder.downloader import MediaDownloader
+        download_config = self.config.get_download_config()
+        self.downloader = MediaDownloader(self.client, download_config)
+        
         # 创建转发器
         forward_config = self.config.get_forward_config()
         self.forwarder = MessageForwarder(self.client, forward_config, self.media_handler)
@@ -108,6 +113,20 @@ class ForwardManager:
                 start_message_id,
                 end_message_id
             )
+            
+            # 检查转发结果中是否有转发的消息
+            if result.get("success") and result.get("forwarded_messages"):
+                # 检查下载配置
+                download_config = self.config.get_download_config()
+                if download_config.get("enabled", False):
+                    logger.info("开始下载转发的媒体文件...")
+                    # 调用下载器下载媒体文件
+                    download_results = await self.downloader.download_forwarded_messages(result["forwarded_messages"])
+                    # 将下载结果添加到转发结果中
+                    result["download_results"] = download_results
+                    logger.info(f"媒体文件下载完成，保存到: {download_config['temp_folder']}")
+                else:
+                    logger.info("媒体文件下载功能未启用，跳过下载")
             
             return result
         
