@@ -169,3 +169,98 @@ cython_debug/
 
 # PyPI configuration file
 .pypirc
+
+# Pyrogram会话文件
+*.session
+*.session-journal
+
+# 配置文件
+config.ini
+config.json
+config.yaml
+config.yml
+.env
+.env.*
+*.conf
+settings.json
+credentials.json
+secrets.*
+
+# Python缓存文件
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Python虚拟环境
+venv/
+ENV/
+env/
+.venv/
+.env/
+
+# 临时文件夹
+tmp/
+temp/
+.temp/
+.tmp/
+downloads/
+uploads/
+media/
+
+# 日志文件
+logs/
+*.log
+log/
+
+# 测试覆盖率相关
+.coverage
+htmlcov/
+.tox/
+.nox/
+.hypothesis/
+.pytest_cache/
+coverage.xml
+*.cover
+
+# IDE相关文件
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+.project
+.pydevproject
+.settings/
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# mypy
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
+# 其他
+*.bak
+*.backup
+*~
+.*.swp
+.directory
