@@ -44,9 +44,9 @@ class ForwardManager:
         self.client = TelegramClient(api_config, proxy_config)
         await self.client.connect()
         
-        # 创建媒体处理器
-        download_config = self.config.get_download_config()
-        self.media_handler = MediaHandler(self.client, download_config)
+        # 获取媒体处理配置
+        media_config = self.config.get_media_config()
+        self.media_handler = MediaHandler(self.client, media_config)
         
         # 创建转发器
         forward_config = self.config.get_forward_config()

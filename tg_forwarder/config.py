@@ -108,22 +108,17 @@ class Config:
         
         return forward_config
     
-    def get_download_config(self) -> Dict[str, Any]:
-        """获取下载配置"""
-        if 'DOWNLOAD' not in self.config:
-            return {
-                'temp_folder': './temp',
-                'timeout': 300,
-                'chunk_size': 4096
-            }
-        
-        download_config = {
-            'temp_folder': self.config.get('DOWNLOAD', 'temp_folder', fallback='./temp'),
-            'timeout': self.config.getint('DOWNLOAD', 'timeout', fallback=300),
-            'chunk_size': self.config.getint('DOWNLOAD', 'chunk_size', fallback=4096),
+    def get_media_config(self) -> Dict[str, Any]:
+        """获取媒体配置"""
+        media_config = {
+            'skip_media': False
         }
         
-        return download_config
+        if 'MEDIA' in self.config:
+            if 'skip_media' in self.config['MEDIA']:
+                media_config['skip_media'] = self.config['MEDIA'].getboolean('skip_media')
+        
+        return media_config
     
     def get_log_config(self) -> Dict[str, Any]:
         """获取日志配置"""

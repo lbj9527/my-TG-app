@@ -114,25 +114,67 @@ class TelegramClient:
             await self.client.disconnect()
             logger.info("已断开与Telegram的连接")
     
-    async def get_entity(self, channel_identifier: Union[str, int]) -> Union[dict, None]:
+    async def get_entity(self, channel_identifier: Union[str, int]) -> Optional[Any]:
         """
-        获取频道、群组或用户的详细信息
+        获取频道/聊天/用户的实体信息
         
         Args:
-            channel_identifier: 频道标识符，可以是用户名或ID
+            channel_identifier: 频道标识符
         
         Returns:
             dict: 实体信息
         """
         try:
-            if isinstance(channel_identifier, int):
-                # 对于数字ID，我们需要获取对应的chat
-                chat = await self.client.get_chat(channel_identifier)
-                return chat
-            else:
-                # 对于用户名
-                chat = await self.client.get_chat(channel_identifier)
-                return chat
+            # 如果是私有频道邀请链接或邀请码
+            if isinstance(channel_identifier, str) and ('t.me/+' in channel_identifier or channel_identifier.startswith('+')):
+                # 提取邀请码
+                if 't.me/+' in channel_identifier:
+                    invite_link = channel_identifier
+                    invite_code = channel_identifier.split('t.me/+')[1].split('/')[0]
+                else:
+                    invite_code = channel_identifier.lstrip('+')
+                    invite_link = f"https://t.me/+{invite_code}"
+                
+                logger.info(f"正在获取私有频道信息 (邀请链接: {invite_link})")
+                
+                try:
+                    # 首先尝试使用邀请链接直接获取聊天
+                    try:
+                        chat = await self.client.get_chat(invite_link)
+                        if chat:
+                            logger.info(f"成功通过邀请链接获取私有频道: {chat.title} (ID: {chat.id})")
+                            return chat
+                    except Exception as e:
+                        logger.warning(f"无法直接通过邀请链接获取频道: {str(e)}")
+                    
+                    # 如果直接获取失败，尝试在对话列表中查找
+                    dialogs = await self.client.get_dialogs()
+                    
+                    # 首先尝试通过邀请链接匹配
+                    for dialog in dialogs:
+                        if dialog.chat and dialog.chat.type in ['group', 'supergroup', 'channel']:
+                            if hasattr(dialog.chat, 'invite_link') and dialog.chat.invite_link:
+                                if invite_code in dialog.chat.invite_link:
+                                    logger.info(f"找到匹配的私有频道: {dialog.chat.title} (ID: {dialog.chat.id})")
+                                    return dialog.chat
+                    
+                    # 如果没有找到匹配的，检查最近的对话
+                    if len(dialogs) > 0:
+                        recent_chat = dialogs[0].chat
+                        logger.info(f"返回最近的对话作为潜在匹配: {recent_chat.title} (ID: {recent_chat.id})")
+                        return recent_chat
+                    
+                except Exception as e:
+                    logger.error(f"寻找私有频道时出错: {str(e)}")
+                
+                # 所有方法失败，返回None
+                logger.error(f"无法找到对应的私有频道，请确保已经加入此频道: {invite_link}")
+                return None
+            
+            # 其他常规情况    
+            chat = await self.client.get_chat(channel_identifier)
+            return chat
+            
         except FloodWait as e:
             logger.warning(f"触发Telegram限流，等待{e.value}秒...")
             await asyncio.sleep(e.value)
