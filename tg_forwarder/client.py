@@ -172,15 +172,45 @@ class TelegramClient:
                 return None
             
             # 其他常规情况    
-            chat = await self.client.get_chat(channel_identifier)
-            return chat
+            try:
+                chat = await self.client.get_chat(channel_identifier)
+                return chat
+            except ValueError as e:
+                if "Peer id invalid" in str(e):
+                    # 记录遇到的无效ID问题
+                    logger.warning(f"遇到无效的Peer ID: {channel_identifier}, 错误: {str(e)}")
+                    
+                    # 尝试在对话列表中寻找类似ID的频道
+                    try:
+                        dialogs = await self.client.get_dialogs()
+                        for dialog in dialogs:
+                            if dialog.chat and str(dialog.chat.id) == str(channel_identifier):
+                                logger.info(f"在对话列表中找到匹配的频道: {dialog.chat.title} (ID: {dialog.chat.id})")
+                                return dialog.chat
+                            
+                            # 尝试将频道ID的不同格式进行匹配
+                            raw_id = str(channel_identifier).replace('-100', '')
+                            dialog_raw_id = str(dialog.chat.id).replace('-100', '')
+                            if raw_id == dialog_raw_id:
+                                logger.info(f"找到ID格式不同但实际相同的频道: {dialog.chat.title} (ID: {dialog.chat.id})")
+                                return dialog.chat
+                                
+                        logger.warning(f"在对话列表中未找到匹配的频道")
+                    except Exception as d_error:
+                        logger.error(f"尝试在对话列表中查找频道时出错: {str(d_error)}")
+                    
+                    # 无法处理时，尝试忽略这个错误，返回None
+                    return None
+                # 如果不是Peer ID错误，重新抛出
+                raise
             
         except FloodWait as e:
             logger.warning(f"触发Telegram限流，等待{e.value}秒...")
             await asyncio.sleep(e.value)
+            # 重试
             return await self.get_entity(channel_identifier)
         except Exception as e:
-            logger.error(f"获取实体信息时出错 ({channel_identifier}): {str(e)}")
+            logger.error(f"获取实体时出错: {str(e)}")
             return None
     
     async def get_message(self, channel: Union[str, int], message_id: int) -> Optional[Message]:

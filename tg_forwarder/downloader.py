@@ -31,6 +31,11 @@ class MediaDownloader:
         # 确保临时文件夹存在
         os.makedirs(self.temp_folder, exist_ok=True)
         
+        # 初始化下载进度跟踪
+        self.download_start_time = {}
+        self.download_previous = {}
+        self.download_speed = {}
+        
         logger.info(f"媒体下载器初始化完成，临时文件夹: {self.temp_folder}")
     
     async def _download_media_with_retry(self, message: Message, folder: str) -> Optional[str]:
@@ -46,6 +51,12 @@ class MediaDownloader:
         """
         max_retries = 3
         retry_count = 0
+        
+        # 初始化此下载的进度跟踪数据
+        msg_id = f"{message.chat.id}_{message.id}"
+        self.download_start_time[msg_id] = time.time()
+        self.download_previous[msg_id] = (0, time.time())
+        self.download_speed[msg_id] = 0
         
         while retry_count < max_retries:
             try:
@@ -79,19 +90,34 @@ class MediaDownloader:
                     # 如果没有原始文件名，使用ID和扩展名
                     unique_filename = f"{chat_id}_{message.id}{extension or '.bin'}"
                 
-                # 下载媒体文件
-                file_path = await message.download(
-                    file_name=os.path.join(folder, unique_filename),
-                    block=True,
-                    progress=self._progress_callback
-                )
-                
-                if file_path:
-                    logger.info(f"成功下载媒体文件: {file_path}")
-                    return file_path
-                else:
-                    logger.warning(f"下载媒体文件失败，返回了空路径")
-                    retry_count += 1
+                try:
+                    # 下载媒体文件
+                    file_path = await message.download(
+                        file_name=os.path.join(folder, unique_filename),
+                        block=True,
+                        progress=self._progress_callback
+                    )
+                    
+                    if file_path:
+                        logger.info(f"成功下载媒体文件: {file_path}")
+                        # 清理进度跟踪数据
+                        if msg_id in self.download_start_time:
+                            del self.download_start_time[msg_id]
+                        if msg_id in self.download_previous:
+                            del self.download_previous[msg_id]
+                        if msg_id in self.download_speed:
+                            del self.download_speed[msg_id]
+                        return file_path
+                    else:
+                        logger.warning(f"下载媒体文件失败，返回了空路径")
+                        retry_count += 1
+                except ValueError as e:
+                    if "Peer id invalid" in str(e):
+                        logger.warning(f"下载时遇到无效的Peer ID错误: {str(e)}，尝试忽略并继续")
+                        # 这是与其他线程中的Pyrogram库错误相关，不影响当前下载
+                        continue
+                    else:
+                        raise e
             
             except FloodWait as e:
                 logger.warning(f"触发Telegram限流，等待{e.value}秒...")
@@ -103,15 +129,110 @@ class MediaDownloader:
                 retry_count += 1
                 await asyncio.sleep(2)  # 等待2秒后重试
         
+        # 清理进度跟踪数据
+        if msg_id in self.download_start_time:
+            del self.download_start_time[msg_id]
+        if msg_id in self.download_previous:
+            del self.download_previous[msg_id]
+        if msg_id in self.download_speed:
+            del self.download_speed[msg_id]
+            
         logger.error(f"媒体文件下载失败，已重试{max_retries}次")
         return None
     
+    def _format_size(self, size_bytes: int) -> str:
+        """将字节大小转换为人类可读格式"""
+        if size_bytes < 1024:
+            return f"{size_bytes} B"
+        elif size_bytes < 1024 * 1024:
+            return f"{size_bytes/1024:.1f} KB"
+        elif size_bytes < 1024 * 1024 * 1024:
+            return f"{size_bytes/(1024*1024):.1f} MB"
+        else:
+            return f"{size_bytes/(1024*1024*1024):.1f} GB"
+    
     async def _progress_callback(self, current, total):
         """下载进度回调函数"""
-        # 每10%更新一次进度
-        if total > 0 and current % (total // 10) < 100000:
-            progress = current / total * 100
-            logger.info(f"下载进度: {progress:.1f}%")
+        if total <= 0:
+            return
+            
+        # 获取当前正在下载的消息ID
+        active_downloads = list(self.download_start_time.keys())
+        if not active_downloads:
+            return
+            
+        msg_id = active_downloads[0]
+        now = time.time()
+        
+        # 计算下载速度 (每秒字节数)
+        prev_bytes, prev_time = self.download_previous.get(msg_id, (0, now))
+        time_diff = now - prev_time
+        
+        # 保证时间差不为零，避免除零错误
+        if time_diff <= 0:
+            time_diff = 0.1
+        
+        try:
+            # 每秒更新一次或下载完成时
+            if time_diff >= 1.0 or current == total or current % (total // 10) < 100000:
+                # 计算下载速度 (字节/秒)
+                speed = (current - prev_bytes) / time_diff
+                # 避免速度波动太大
+                old_speed = self.download_speed.get(msg_id, 0)
+                if old_speed > 0:
+                    # 平滑处理速度变化
+                    speed = old_speed * 0.7 + speed * 0.3
+                self.download_speed[msg_id] = speed
+                    
+                # 更新上一次记录的值
+                self.download_previous[msg_id] = (current, now)
+                
+                # 计算进度百分比
+                progress = current / total * 100
+                
+                # 计算预计剩余时间
+                if speed > 0:
+                    eta = (total - current) / speed
+                    if eta > 3600:
+                        eta_str = f"{int(eta // 3600)}时{int((eta % 3600) // 60)}分"
+                    elif eta > 60:
+                        eta_str = f"{int(eta // 60)}分{int(eta % 60)}秒"
+                    else:
+                        eta_str = f"{int(eta)}秒"
+                else:
+                    eta_str = "计算中..."
+                
+                # 计算已用时间
+                elapsed = now - self.download_start_time.get(msg_id, now)
+                if elapsed > 3600:
+                    elapsed_str = f"{int(elapsed // 3600)}时{int((elapsed % 3600) // 60)}分"
+                elif elapsed > 60:
+                    elapsed_str = f"{int(elapsed // 60)}分{int(elapsed % 60)}秒"
+                else:
+                    elapsed_str = f"{int(elapsed)}秒"
+                
+                # 格式化大小显示
+                current_size = self._format_size(current)
+                total_size = self._format_size(total)
+                speed_str = self._format_size(int(speed)) + "/s"
+                
+                # 提取文件名
+                file_name = msg_id.split('_')[-1] if '_' in msg_id else f"文件{msg_id}"
+                file_name_short = file_name[:15] + '...' if len(file_name) > 15 else file_name
+                
+                # 构建进度信息
+                progress_info = (
+                    f"下载进度: {progress:.1f}% | "
+                    f"{current_size}/{total_size} | "
+                    f"速度: {speed_str} | "
+                    f"已用: {elapsed_str} | "
+                    f"剩余: {eta_str}"
+                )
+                
+                logger.info(progress_info)
+        except Exception as e:
+            # 确保进度显示错误不会中断下载过程
+            logger.error(f"显示下载进度时出错: {str(e)}")
     
     def _get_extension_for_media(self, message: Message) -> str:
         """
@@ -267,16 +388,22 @@ class MediaDownloader:
                 
                 # 获取文件的唯一ID
                 file_unique_id = None
-                if msg.photo:
-                    file_unique_id = msg.photo.file_unique_id
-                elif msg.video:
-                    file_unique_id = msg.video.file_unique_id
-                elif msg.document:
-                    file_unique_id = msg.document.file_unique_id
-                elif msg.audio:
-                    file_unique_id = msg.audio.file_unique_id
-                elif msg.voice:
-                    file_unique_id = msg.voice.file_unique_id
+                try:
+                    if msg.photo:
+                        file_unique_id = msg.photo.file_unique_id
+                    elif msg.video:
+                        file_unique_id = msg.video.file_unique_id
+                    elif msg.document:
+                        file_unique_id = msg.document.file_unique_id
+                    elif msg.audio:
+                        file_unique_id = msg.audio.file_unique_id
+                    elif msg.voice:
+                        file_unique_id = msg.voice.file_unique_id
+                except ValueError as e:
+                    if "Peer id invalid" in str(e):
+                        logger.warning(f"获取文件ID时遇到无效的Peer ID错误，跳过此消息: {msg.id}")
+                        continue
+                    raise
                 
                 # 如果无法获取文件ID或已处理过，跳过
                 if not file_unique_id or file_unique_id in seen_file_ids:
@@ -300,39 +427,72 @@ class MediaDownloader:
         individual_messages = []
         
         for msg in all_messages:
-            if msg.media_group_id:
-                if msg.media_group_id not in grouped_messages:
-                    grouped_messages[msg.media_group_id] = []
-                grouped_messages[msg.media_group_id].append(msg)
-            else:
-                individual_messages.append(msg)
+            try:
+                if msg.media_group_id:
+                    if msg.media_group_id not in grouped_messages:
+                        grouped_messages[msg.media_group_id] = []
+                    grouped_messages[msg.media_group_id].append(msg)
+                else:
+                    individual_messages.append(msg)
+            except ValueError as e:
+                if "Peer id invalid" in str(e):
+                    logger.warning(f"处理消息分组时遇到无效的Peer ID错误，跳过此消息: {msg.id}")
+                    continue
+                raise
         
         # 下载媒体组
         for group_id, group_messages in grouped_messages.items():
-            group_results = await self.download_media_group(group_messages)
-            for msg_id, file_path in group_results.items():
-                if file_path:
-                    # 记录下载的文件路径
-                    downloaded_files[msg_id] = file_path
+            try:
+                group_results = await self.download_media_group(group_messages)
+                for msg_id, file_path in group_results.items():
+                    if file_path:
+                        # 记录下载的文件路径
+                        downloaded_files[msg_id] = file_path
+            except ValueError as e:
+                if "Peer id invalid" in str(e):
+                    logger.warning(f"下载媒体组时遇到无效的Peer ID错误，跳过此组: {group_id}")
+                    continue
+                raise
+            except Exception as e:
+                logger.error(f"下载媒体组时出错: {str(e)}")
+                continue
         
         # 下载单个消息
         for msg in individual_messages:
-            file_path = await self.download_media_from_message(msg)
-            if file_path:
-                downloaded_files[msg.id] = file_path
+            try:
+                file_path = await self.download_media_from_message(msg)
+                if file_path:
+                    downloaded_files[msg.id] = file_path
+            except ValueError as e:
+                if "Peer id invalid" in str(e):
+                    logger.warning(f"下载单个消息时遇到无效的Peer ID错误，跳过此消息: {msg.id}")
+                    continue
+                raise
+            except Exception as e:
+                logger.error(f"下载单个消息时出错: {str(e)}")
+                continue
         
         # 将下载结果与每个目标频道关联
         for target in forward_results.keys():
             download_results[target] = {}
             for msg in forward_results[target]:
-                if msg.media and msg.id in downloaded_files:
-                    download_results[target][msg.id] = downloaded_files[msg.id]
-                elif msg.media and msg.media_group_id and any(m.id in downloaded_files for m in forward_results[target] if m.media_group_id == msg.media_group_id):
-                    # 对于媒体组，找一个已下载的成员
-                    for m in forward_results[target]:
-                        if m.media_group_id == msg.media_group_id and m.id in downloaded_files:
-                            download_results[target][msg.id] = downloaded_files[m.id]
-                            break
+                try:
+                    if msg.media and msg.id in downloaded_files:
+                        download_results[target][msg.id] = downloaded_files[msg.id]
+                    elif msg.media and hasattr(msg, 'media_group_id') and msg.media_group_id and any(m.id in downloaded_files for m in forward_results[target] if hasattr(m, 'media_group_id') and m.media_group_id == msg.media_group_id):
+                        # 对于媒体组，找一个已下载的成员
+                        for m in forward_results[target]:
+                            if hasattr(m, 'media_group_id') and m.media_group_id == msg.media_group_id and m.id in downloaded_files:
+                                download_results[target][msg.id] = downloaded_files[m.id]
+                                break
+                except ValueError as e:
+                    if "Peer id invalid" in str(e):
+                        logger.warning(f"关联下载结果时遇到无效的Peer ID错误，跳过此消息: {msg.id}")
+                        continue
+                    raise
+                except Exception as e:
+                    logger.error(f"关联下载结果时出错: {str(e)}, 消息ID: {msg.id}")
+                    continue
         
         # 统计下载结果
         total_unique_files = len(all_messages)
