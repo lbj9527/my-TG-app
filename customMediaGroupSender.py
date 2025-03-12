@@ -313,13 +313,13 @@ class UploadProgressTracker:
                 f"进度: {Fore.MAGENTA}{self.uploaded_files}/{self.total_files}文件{Style.RESET_ALL}"
             )
         else:
-            logger.info(
+        logger.info(
                 f"文件完成: {short_name} | "
                 f"大小: {format_size(self.current_file_size)} | "
                 f"用时: {elapsed:.2f}秒 | "
                 f"平均速度: {format_size(speed)}/s | "
                 f"进度: {self.uploaded_files}/{self.total_files}文件"
-            )
+        )
     
     def complete_all(self):
         """完成所有文件上传"""
@@ -341,13 +341,13 @@ class UploadProgressTracker:
                 f"平均速度: {Fore.YELLOW}{format_size(avg_speed)}/s{Style.RESET_ALL}"
             )
         else:
-            logger.info(
+        logger.info(
                 f"全部完成 | "
                 f"共 {self.uploaded_files} 个文件 | "
                 f"总大小: {format_size(self.uploaded_size)} | "
                 f"总用时: {total_elapsed:.2f}秒 | "
-                f"平均速度: {format_size(avg_speed)}/s"
-            )
+            f"平均速度: {format_size(avg_speed)}/s"
+        )
 
 def format_size(size_bytes: int) -> str:
     """格式化文件大小显示"""
@@ -422,7 +422,7 @@ class CustomMediaGroupSender:
                 parsed = parse_channel_identifier(channel)
                 if parsed:
                     self.target_channels.append(parsed)
-            
+    
     def get_media_files(self, folder: str, limit: int = 10) -> List[str]:
         """获取指定文件夹下的媒体文件"""
         if not os.path.exists(folder):
@@ -456,7 +456,7 @@ class CustomMediaGroupSender:
         mime_type = mimetypes.guess_type(file_path)[0] or ""
         
         if tracker:
-            tracker.start_file(file_name, file_size)
+        tracker.start_file(file_name, file_size)
         
         try:
             # 创建一个临时聊天ID，用于获取文件ID
@@ -529,7 +529,7 @@ class CustomMediaGroupSender:
                  colour='magenta' if not COLORAMA_AVAILABLE else None) if TQDM_AVAILABLE else None as file_pbar:
             # 上传所有文件并获取文件ID
             media_list = []
-            for file_path in file_paths:
+        for file_path in file_paths:
                 file_name = os.path.basename(file_path)
                 mime_type = mimetypes.guess_type(file_path)[0] or ""
                 
@@ -642,8 +642,8 @@ class CustomMediaGroupSender:
                     if TQDM_AVAILABLE and batch_pbar:
                         batch_pbar.update(1)
             
-            tracker.complete_all()
-            
+        tracker.complete_all()
+        
             logger.info(f"媒体组发送完成: {len(media_list)}/{len(file_paths)} 成功")
             return True
             
@@ -664,15 +664,15 @@ class CustomMediaGroupSender:
         with tqdm(total=len(self.target_channels), desc=channel_desc, unit="个", position=0,
                  bar_format=TOTAL_BAR_FORMAT,
                  colour='cyan' if not COLORAMA_AVAILABLE else None) if TQDM_AVAILABLE else None as channel_pbar:
-            for channel in self.target_channels:
+        for channel in self.target_channels:
                 # 彩色日志
                 if COLORAMA_AVAILABLE:
                     logger.info(f"{Fore.CYAN}{Style.BRIGHT}开始向频道 {channel} 发送媒体组{Style.RESET_ALL}")
                 else:
-                    logger.info(f"开始向频道 {channel} 发送媒体组")
+            logger.info(f"开始向频道 {channel} 发送媒体组")
                     
-                success = await self.send_media_group_with_progress(channel, file_paths)
-                results[channel] = success
+            success = await self.send_media_group_with_progress(channel, file_paths)
+            results[channel] = success
                 
                 # 更新频道进度条
                 if TQDM_AVAILABLE and channel_pbar:
@@ -871,7 +871,7 @@ if __name__ == "__main__":
     
     # 运行主函数
     try:
-        asyncio.run(main())
+    asyncio.run(main()) 
     except KeyboardInterrupt:
         if COLORAMA_AVAILABLE:
             print(f"\n{Fore.YELLOW}⚠️ 程序被用户中断{Style.RESET_ALL}")
