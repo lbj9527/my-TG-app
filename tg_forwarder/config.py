@@ -153,4 +153,20 @@ class Config:
             if 'enabled' in self.config['DOWNLOAD']:
                 download_config['enabled'] = self.config['DOWNLOAD'].getboolean('enabled')
         
-        return download_config 
+        return download_config
+    
+    def get_upload_config(self) -> Dict[str, Any]:
+        """获取上传配置"""
+        upload_config = {
+            'enabled': False,
+            'upload_after_forward': True
+        }
+        
+        if 'UPLOAD' in self.config:
+            if 'enabled' in self.config['UPLOAD']:
+                upload_config['enabled'] = self.config['UPLOAD'].getboolean('enabled')
+            
+            if 'upload_after_forward' in self.config['UPLOAD']:
+                upload_config['upload_after_forward'] = self.config['UPLOAD'].getboolean('upload_after_forward')
+        
+        return upload_config 

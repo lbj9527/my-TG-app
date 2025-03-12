@@ -13,6 +13,12 @@ from tg_forwarder.media_handler import MediaHandler
 from tg_forwarder.forwarder import MessageForwarder
 from tg_forwarder.utils.logger import setup_logger, get_logger
 
+# 导入上传类
+import sys
+import os
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from uploader import Uploader
+
 logger = get_logger("manager")
 
 class ForwardManager:
@@ -26,6 +32,7 @@ class ForwardManager:
             config_path: 配置文件路径
         """
         self.config = Config(config_path)
+        self.config_path = config_path
         self.client = None
         self.media_handler = None
         self.forwarder = None
@@ -127,6 +134,27 @@ class ForwardManager:
                     logger.info(f"媒体文件下载完成，保存到: {download_config['temp_folder']}")
                 else:
                     logger.info("媒体文件下载功能未启用，跳过下载")
+                
+                # 检查上传配置
+                upload_config = self.config.get_upload_config()
+                if upload_config.get("enabled", False) and upload_config.get("upload_after_forward", True):
+                    logger.info("开始上传本地媒体文件...")
+                    try:
+                        # 调用Uploader上传媒体文件
+                        upload_success = await Uploader.create_and_upload(self.config_path)
+                        if upload_success:
+                            logger.info("媒体文件上传成功")
+                            # 将上传结果添加到转发结果中
+                            result["upload_success"] = True
+                        else:
+                            logger.error("媒体文件上传失败")
+                            result["upload_success"] = False
+                    except Exception as e:
+                        logger.error(f"上传过程中发生错误: {str(e)}")
+                        result["upload_success"] = False
+                        result["upload_error"] = str(e)
+                else:
+                    logger.info("媒体文件上传功能未启用或不需要在转发后上传")
             
             return result
         
