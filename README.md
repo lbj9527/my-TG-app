@@ -11,41 +11,110 @@
 - 支持 SOCKS5/SOCKS4 代理设置
 - 自动处理连接中断和重试
 - 完善的日志记录系统
+- 媒体文件压缩优化和批量上传功能
 
 ## 使用方法
 
 1. 复制`config_example.ini`为`config.ini`并填写相关配置
 2. 运行`python main.py`开始转发
 
-## 配置说明
-
-```ini
-[API]
-api_id = 你的API_ID
-api_hash = 你的API_HASH
-phone_number = 你的电话号码（可选）
-
-[PROXY]
-enabled = False
-proxy_type = SOCKS5
-addr = 127.0.0.1
-port = 1080
-username =
-password =
-
-[CHANNELS]
-source_channel = https://t.me/channel_name
-target_channels = @channel1,@channel2
-
-[FORWARD]
-start_message_id = 0
-end_message_id = 0
-hide_author = False
-delay = 1
-```
-
 ## 安装依赖
 
 ```bash
 pip install -r requirements.txt
+# 如需使用图片优化功能，还需安装：
+pip install pillow
 ```
+
+## 配置项详细说明
+
+配置文件（config.ini）包含以下各个部分的设置项：
+
+### [API] - Telegram API 设置
+
+| 配置项         | 说明              | 取值范围                                | 默认值    |
+| -------------- | ----------------- | --------------------------------------- | --------- |
+| `api_id`       | Telegram API ID   | 整数，从 https://my.telegram.org 获取   | 无，必填  |
+| `api_hash`     | Telegram API Hash | 字符串，从 https://my.telegram.org 获取 | 无，必填  |
+| `phone_number` | 账号电话号码      | 字符串，带国家代码（如+8613800138000）  | 空 (可选) |
+
+### [PROXY] - 代理设置
+
+| 配置项       | 说明           | 取值范围                   | 默认值      |
+| ------------ | -------------- | -------------------------- | ----------- |
+| `enabled`    | 是否启用代理   | `True` 或 `False`          | `False`     |
+| `proxy_type` | 代理类型       | `SOCKS5`、`SOCKS4`、`HTTP` | `SOCKS5`    |
+| `addr`       | 代理服务器地址 | IP 地址或域名              | `127.0.0.1` |
+| `port`       | 代理服务器端口 | 1-65535                    | `1080`      |
+| `username`   | 代理认证用户名 | 字符串                     | 空 (可选)   |
+| `password`   | 代理认证密码   | 字符串                     | 空 (可选)   |
+
+### [CHANNELS] - 频道设置
+
+| 配置项            | 说明         | 取值范围                    | 默认值   |
+| ----------------- | ------------ | --------------------------- | -------- |
+| `source_channel`  | 源频道标识符 | 频道链接、用户名(@xxx)或 ID | 无，必填 |
+| `target_channels` | 目标频道列表 | 逗号分隔的多个频道标识符    | 无，必填 |
+
+### [FORWARD] - 转发设置
+
+| 配置项                | 说明                    | 取值范围             | 默认值  |
+| --------------------- | ----------------------- | -------------------- | ------- |
+| `start_message_id`    | 起始消息 ID             | 整数，0 表示自动选择 | `0`     |
+| `end_message_id`      | 结束消息 ID             | 整数，0 表示最新消息 | `0`     |
+| `hide_author`         | 是否隐藏原作者          | `True` 或 `False`    | `False` |
+| `delay`               | 消息间转发延迟(秒)      | 浮点数，≥0           | `1.0`   |
+| `batch_size`          | 每批获取的消息数量      | 整数，1-100          | `50`    |
+| `skip_emoji_messages` | 是否跳过含 emoji 的消息 | `True` 或 `False`    | `False` |
+
+### [MEDIA] - 媒体设置
+
+| 配置项       | 说明             | 取值范围          | 默认值  |
+| ------------ | ---------------- | ----------------- | ------- |
+| `skip_media` | 是否跳过媒体文件 | `True` 或 `False` | `False` |
+
+### [DOWNLOAD] - 下载设置
+
+| 配置项        | 说明               | 取值范围             | 默认值 |
+| ------------- | ------------------ | -------------------- | ------ |
+| `temp_folder` | 临时文件存储文件夹 | 有效文件路径         | `temp` |
+| `timeout`     | 下载超时时间(秒)   | 整数，≥1             | `300`  |
+| `chunk_size`  | 下载分块大小(字节) | 整数，推荐 4096-8192 | `4096` |
+| `enabled`     | 是否启用媒体下载   | `True` 或 `False`    | `True` |
+
+### [UPLOAD] - 上传设置
+
+| 配置项                   | 说明                   | 取值范围            | 默认值 |
+| ------------------------ | ---------------------- | ------------------- | ------ |
+| `enabled`                | 是否启用媒体上传       | `True` 或 `False`   | `True` |
+| `upload_after_forward`   | 是否在转发后上传       | `True` 或 `False`   | `True` |
+| `optimize_images`        | 是否优化图片以加快上传 | `True` 或 `False`   | `True` |
+| `max_image_size`         | 图片最大尺寸(像素)     | 整数，建议 800-2000 | `1280` |
+| `image_quality`          | 图片保存质量           | 整数，1-100         | `85`   |
+| `max_concurrent_batches` | 最大并发上传批次数     | 整数，建议 1-5      | `3`    |
+
+### [LOG] - 日志设置
+
+| 配置项  | 说明         | 取值范围                                        | 默认值         |
+| ------- | ------------ | ----------------------------------------------- | -------------- |
+| `level` | 日志级别     | `DEBUG`、`INFO`、`WARNING`、`ERROR`、`CRITICAL` | `INFO`         |
+| `file`  | 日志文件路径 | 有效文件路径                                    | `logs/app.log` |
+
+## 图片优化说明
+
+当 `optimize_images` 设置为 `True` 时，程序会在上传前对图片进行优化，具体优化方式为：
+
+1. 限制图片的最大尺寸（由 `max_image_size` 控制）
+2. 调整图片的保存质量（由 `image_quality` 控制）
+
+这可以大幅提高上传速度，减少网络带宽使用。如果您的网络速度较慢，建议启用此功能。
+
+## 批量上传说明
+
+程序支持批量上传媒体文件，并可通过 `max_concurrent_batches` 控制并发上传的批次数：
+
+1. 媒体文件会按每 10 个一组进行分批
+2. 每批并发上传到所有目标频道
+3. 最多同时处理 `max_concurrent_batches` 个批次
+
+通过增加并发批次数可以提高上传速度，但也会增加网络和服务器负载。

@@ -11,6 +11,7 @@ import subprocess
 import json
 from pyrogram import Client
 from pyrogram.types import InputMediaPhoto, InputMediaVideo
+import time
 
 # 将logging替换为tg_forwarder的日志系统
 from tg_forwarder.utils.logger import get_logger
@@ -82,6 +83,22 @@ class Uploader:
             self.temp_folder = self.config.get('DOWNLOAD', 'temp_folder')
             if self.temp_folder.startswith('./'):
                 self.temp_folder = self.temp_folder[2:]
+            
+            # 图片优化配置
+            self.optimize_images = self.config.getboolean('UPLOAD', 'optimize_images', fallback=True)
+            self.max_image_size = self.config.getint('UPLOAD', 'max_image_size', fallback=1280)
+            self.image_quality = self.config.getint('UPLOAD', 'image_quality', fallback=85)
+            
+            # 上传并发配置
+            self.max_concurrent_batches = self.config.getint('UPLOAD', 'max_concurrent_batches', fallback=3)
+            
+            # 输出配置信息
+            if self.optimize_images:
+                logger.info(f"图片优化已启用，最大尺寸: {self.max_image_size}px, 质量: {self.image_quality}%")
+            else:
+                logger.info(f"图片优化已禁用")
+                
+            logger.info(f"最大并发上传批次: {self.max_concurrent_batches}")
             
             logger.info("配置加载成功")
             
@@ -253,81 +270,100 @@ class Uploader:
             
         all_results = {}
         
+        # 创建每个频道的上传任务
+        upload_tasks = []
         for channel in self.target_channels:
-            channel_results = []
-            
-            if is_group:
-                # 使用媒体组发送
-                media_group = []
-                valid_files = []
-                
-                for i, filename in enumerate(files):
-                    filepath = os.path.join(self.temp_folder, filename)
-                    if not self.check_file(filepath, quiet=True):
-                        continue
-                    
-                    valid_files.append(filename)
-                    caption = f"媒体组: {filename}" if i == 0 else None
-                    
-                    if filename.endswith(('.jpg', '.jpeg', '.png')):
-                        media_group.append(InputMediaPhoto(
-                            media=filepath,
-                            caption=caption
-                        ))
-                    elif filename.endswith(('.mp4', '.mov', '.avi')):
-                        media_group.append(InputMediaVideo(
-                            media=filepath,
-                            caption=caption,
-                            supports_streaming=True
-                        ))
-                
-                if len(media_group) >= 2:
-                    try:
-                        logger.info(f"向频道{channel}发送媒体组({len(media_group)}个项目)")
-                        result = await self.client.send_media_group(
-                            chat_id=channel,
-                            media=media_group
-                        )
-                        logger.info(f"向频道{channel}成功发送媒体组，共{len(result)}个项目")
-                        channel_results.extend(valid_files)
-                    except Exception as e:
-                        logger.error(f"向频道{channel}发送媒体组失败: {repr(e)}")
-            else:
-                # 单独发送每个文件
-                for filename in files:
-                    filepath = os.path.join(self.temp_folder, filename)
-                    if not self.check_file(filepath, quiet=True):
-                        continue
-                    
-                    try:
-                        if filename.endswith(('.jpg', '.jpeg', '.png')):
-                            logger.info(f"向频道{channel}单独发送照片: {filename}")
-                            await self.client.send_photo(
-                                chat_id=channel,
-                                photo=filepath,
-                                caption=f"单独发送: {filename}"
-                            )
-                            logger.info(f"向频道{channel}单独发送照片成功: {filename}")
-                            channel_results.append(filename)
-                        
-                        elif filename.endswith(('.mp4', '.mov', '.avi')):
-                            logger.info(f"向频道{channel}单独发送视频: {filename}")
-                            await self.client.send_video(
-                                chat_id=channel,
-                                video=filepath,
-                                caption=f"单独发送: {filename}",
-                                supports_streaming=True
-                            )
-                            logger.info(f"向频道{channel}单独发送视频成功: {filename}")
-                            channel_results.append(filename)
-                    
-                    except Exception as e:
-                        logger.error(f"向频道{channel}单独发送文件{filename}失败: {repr(e)}")
-            
-            all_results[channel] = channel_results
+            task = self.send_files_to_channel(channel, files, is_group)
+            upload_tasks.append(task)
         
-        # 返回每个频道成功发送的文件列表
+        # 并发执行所有上传任务
+        channel_results = await asyncio.gather(*upload_tasks, return_exceptions=True)
+        
+        # 处理结果
+        for i, channel in enumerate(self.target_channels):
+            if isinstance(channel_results[i], Exception):
+                logger.error(f"向频道 {channel} 上传时发生错误: {str(channel_results[i])}")
+                all_results[channel] = []
+            else:
+                all_results[channel] = channel_results[i]
+                
         return all_results
+    
+    async def send_files_to_channel(self, channel, files, is_group=True):
+        """
+        向单个频道发送文件，作为send_files_to_all_channels的辅助方法
+        """
+        channel_results = []
+        
+        if is_group:
+            # 使用媒体组发送
+            media_group = []
+            valid_files = []
+            
+            for i, filename in enumerate(files):
+                filepath = os.path.join(self.temp_folder, filename)
+                if not self.check_file(filepath, quiet=True):
+                    continue
+                
+                valid_files.append(filename)
+                caption = f"媒体组: {filename}" if i == 0 else None
+                
+                if filename.endswith(('.jpg', '.jpeg', '.png')):
+                    media_group.append(InputMediaPhoto(
+                        media=filepath,
+                        caption=caption
+                    ))
+                elif filename.endswith(('.mp4', '.mov', '.avi')):
+                    media_group.append(InputMediaVideo(
+                        media=filepath,
+                        caption=caption,
+                        supports_streaming=True
+                    ))
+            
+            if len(media_group) >= 2:
+                try:
+                    logger.info(f"向频道{channel}发送媒体组({len(media_group)}个项目)")
+                    result = await self.client.send_media_group(
+                        chat_id=channel,
+                        media=media_group
+                    )
+                    logger.info(f"向频道{channel}成功发送媒体组，共{len(result)}个项目")
+                    channel_results.extend(valid_files)
+                except Exception as e:
+                    logger.error(f"向频道{channel}发送媒体组失败: {repr(e)}")
+        else:
+            # 单独发送每个文件
+            for filename in files:
+                filepath = os.path.join(self.temp_folder, filename)
+                if not self.check_file(filepath, quiet=True):
+                    continue
+                
+                try:
+                    if filename.endswith(('.jpg', '.jpeg', '.png')):
+                        logger.info(f"向频道{channel}单独发送照片: {filename}")
+                        await self.client.send_photo(
+                            chat_id=channel,
+                            photo=filepath,
+                            caption=f"单独发送: {filename}"
+                        )
+                        logger.info(f"向频道{channel}单独发送照片成功: {filename}")
+                        channel_results.append(filename)
+                    
+                    elif filename.endswith(('.mp4', '.mov', '.avi')):
+                        logger.info(f"向频道{channel}单独发送视频: {filename}")
+                        await self.client.send_video(
+                            chat_id=channel,
+                            video=filepath,
+                            caption=f"单独发送: {filename}",
+                            supports_streaming=True
+                        )
+                        logger.info(f"向频道{channel}单独发送视频成功: {filename}")
+                        channel_results.append(filename)
+                
+                except Exception as e:
+                    logger.error(f"向频道{channel}单独发送文件{filename}失败: {repr(e)}")
+        
+        return channel_results
     
     async def upload_media(self):
         """
@@ -337,6 +373,9 @@ class Uploader:
         2. 将符合要求的文件分批（每批不超过10个）发送到所有目标频道
         3. 将不符合要求的文件单独发送到所有目标频道
         """
+        # 记录开始时间
+        start_time = time.time()
+        
         logger.info("========== 开始上传媒体文件 ==========")
         logger.info(f"配置信息: 目标频道: {self.target_channels}")
         logger.info(f"临时文件夹: {self.temp_folder}")
@@ -414,18 +453,48 @@ class Uploader:
                         # 不足2个的放入不兼容列表单独发送
                         incompatible_files.extend(batch)
                 
-                # 逐批发送
-                for i, batch in enumerate(batches):
-                    logger.info(f"=== 发送第{i+1}/{len(batches)}批媒体组 ===")
-                    results = await self.send_files_to_all_channels(batch, is_group=True)
+                # 预处理图片以提高上传速度
+                if batches and self.optimize_images:
+                    # 检查PIL库是否可用
+                    try:
+                        import PIL
+                        has_pil = True
+                    except ImportError:
+                        has_pil = False
+                        logger.warning("PIL(Pillow)库未安装，图片优化功能不可用。为提高上传速度，建议安装: pip install pillow")
+
+                    if has_pil:
+                        logger.info("预处理图片以优化上传速度...")
+                        await self._optimize_images_for_upload(batches)
+                    else:
+                        logger.info("跳过图片优化，直接上传...")
+                elif batches:
+                    logger.info("图片优化已在配置中禁用，跳过优化步骤")
+                
+                # 并发处理各批次
+                logger.info(f"开始并发上传 {len(batches)} 个媒体组批次...")
+                
+                # 按最大并发数分批处理
+                for i in range(0, len(batches), self.max_concurrent_batches):
+                    batch_slice = batches[i:i + self.max_concurrent_batches]
+                    batch_tasks = []
                     
-                    # 输出每个频道的发送结果
-                    for channel, sent_files in results.items():
-                        logger.info(f"第{i+1}批媒体组，频道{channel}成功发送: {sent_files}")
+                    logger.info(f"处理第 {i//self.max_concurrent_batches + 1} 组并发批次，包含 {len(batch_slice)} 个媒体组")
                     
-                    # 等待一下再发送下一批
-                    if i < len(batches) - 1:
-                        await asyncio.sleep(3)
+                    # 创建当前切片的所有上传任务
+                    for j, batch in enumerate(batch_slice):
+                        batch_index = i + j
+                        task = asyncio.create_task(self._upload_batch(batch_index, batch, len(batches)))
+                        batch_tasks.append(task)
+                    
+                    # 等待当前切片的所有任务完成
+                    slice_results = await asyncio.gather(*batch_tasks, return_exceptions=True)
+                    
+                    # 处理结果
+                    for j, result in enumerate(slice_results):
+                        batch_index = i + j
+                        if isinstance(result, Exception):
+                            logger.error(f"上传第{batch_index+1}批次时出错: {str(result)}")
             
             # 第3步：单独发送不符合要求的文件
             if incompatible_files:
@@ -437,12 +506,18 @@ class Uploader:
                     logger.info(f"单独发送，频道{channel}成功发送: {sent_files}")
             
             # 添加总结信息
+            end_time = time.time()
+            upload_duration = end_time - start_time
             logger.info("========== 媒体文件上传完成 ==========")
             logger.info(f"上传统计: 总文件数 {len(supported_files)}")
             if 'compatible_files' in locals():
                 logger.info(f"媒体组上传: {len(compatible_files)} 个文件")
+                # 计算上传速度
+                files_per_second = len(compatible_files) / upload_duration if upload_duration > 0 else 0
+                logger.info(f"上传速度: {files_per_second:.2f} 文件/秒")
             if 'incompatible_files' in locals():
                 logger.info(f"单独上传: {len(incompatible_files)} 个文件")
+            logger.info(f"总耗时: {upload_duration:.2f} 秒")
             
             await self.client.stop()
             logger.info("已断开与Telegram的连接")
@@ -466,6 +541,75 @@ class Uploader:
         """
         uploader = cls(config_path)
         return await uploader.upload_media()
+
+    async def _optimize_images_for_upload(self, batches):
+        """
+        优化图片以加快上传速度
+        """
+        try:
+            # 导入图片处理库
+            from PIL import Image
+            import io
+            
+            # 计算需要处理的图片数量
+            img_count = sum(len([f for f in batch if f.endswith(('.jpg', '.jpeg', '.png'))]) for batch in batches)
+            if img_count == 0:
+                return
+                
+            logger.info(f"开始优化 {img_count} 张图片...")
+            
+            # 优化每个批次中的图片
+            for batch in batches:
+                for filename in batch:
+                    if not filename.endswith(('.jpg', '.jpeg', '.png')):
+                        continue
+                        
+                    filepath = os.path.join(self.temp_folder, filename)
+                    try:
+                        # 打开图片
+                        with Image.open(filepath) as img:
+                            # 计算新尺寸，保持宽高比，但限制最大尺寸为配置的值
+                            width, height = img.size
+                            max_size = self.max_image_size
+                            
+                            if width > max_size or height > max_size:
+                                if width > height:
+                                    new_width = max_size
+                                    new_height = int(height * (max_size / width))
+                                else:
+                                    new_height = max_size
+                                    new_width = int(width * (max_size / height))
+                                
+                                # 调整图片尺寸
+                                img = img.resize((new_width, new_height), Image.LANCZOS)
+                                logger.info(f"调整图片 {filename} 尺寸: {width}x{height} -> {new_width}x{new_height}")
+                            
+                            # 保存优化后的图片，质量为配置的值
+                            img.save(filepath, optimize=True, quality=self.image_quality)
+                            
+                    except Exception as e:
+                        logger.warning(f"优化图片 {filename} 时出错: {str(e)}")
+                        continue
+                        
+            logger.info("图片优化完成")
+            
+        except ImportError:
+            logger.warning("PIL库不可用，跳过图片优化")
+        except Exception as e:
+            logger.warning(f"图片优化过程中出错: {str(e)}")
+
+    async def _upload_batch(self, batch_index, batch, total_batches):
+        """
+        上传单个批次的文件
+        """
+        logger.info(f"=== 上传第{batch_index+1}/{total_batches}批媒体组 ===")
+        results = await self.send_files_to_all_channels(batch, is_group=True)
+        
+        # 输出每个频道的发送结果
+        for channel, sent_files in results.items():
+            logger.info(f"第{batch_index+1}批媒体组，频道{channel}成功发送: {sent_files}")
+            
+        return results
 
 
 # 测试代码（当作为独立脚本运行时执行）
