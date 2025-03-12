@@ -12,10 +12,35 @@ from pyrogram.types import InputMediaPhoto, InputMediaVideo, InputMediaDocument
 import logging
 
 # 设置日志系统
+# 创建一个过滤器来过滤掉不需要的pyrogram日志
+class PyrogramFilter(logging.Filter):
+    def filter(self, record):
+        # 过滤掉大部分pyrogram的连接和会话信息
+        if record.name.startswith('pyrogram') and any(msg in record.getMessage() for msg in 
+                                                     ['Session', 'NetworkTask', 'PingTask', 'Connected', 'Connecting']):
+            return False
+        return True
+
+# 设置日志格式和级别
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        # 文件处理器确保完整日志被保存
+        logging.FileHandler("upload_test.log", encoding="utf-8"),
+        # 控制台处理器过滤掉不必要的pyrogram日志
+        logging.StreamHandler()
+    ]
 )
+
+# 应用过滤器到根日志记录器的控制台处理器
+for handler in logging.getLogger().handlers:
+    if isinstance(handler, logging.StreamHandler) and not isinstance(handler, logging.FileHandler):
+        handler.addFilter(PyrogramFilter())
+
+# 降低pyrogram日志级别
+logging.getLogger("pyrogram").setLevel(logging.WARNING)
+
 logger = logging.getLogger("TestUpload")
 
 async def upload_media_group():
@@ -106,7 +131,7 @@ async def upload_media_group():
             # 测试方法1：使用文件路径
             logger.info("============== 测试方法1：使用文件路径 ==============")
             media_list_paths = []
-            for i, filename in enumerate(media_files[:5]):  # 只使用前5个文件
+            for i, filename in enumerate(media_files[:4]):  # 只使用前4个文件
                 filepath = os.path.join(temp_folder, filename)
                 if filename.endswith(('.jpg', '.jpeg', '.png')):
                     media_list_paths.append(InputMediaPhoto(
@@ -128,7 +153,8 @@ async def upload_media_group():
                     )
                     logger.info(f"成功！发送了 {len(result)} 个媒体项目")
                 except Exception as e:
-                    logger.error(f"发送失败: {str(e)}")
+                    # 使用repr()确保完整错误信息被记录，避免截断
+                    logger.error(f"发送失败: {repr(e)}")
             
             # 测试方法2：使用文件对象
             logger.info("============== 测试方法2：使用文件对象 ==============")
@@ -161,7 +187,8 @@ async def upload_media_group():
                         )
                         logger.info(f"成功！发送了 {len(result)} 个媒体项目")
                     except Exception as e:
-                        logger.error(f"发送失败: {str(e)}")
+                        # 使用repr()确保完整错误信息被记录，避免截断
+                        logger.error(f"发送失败: {repr(e)}")
             finally:
                 # 关闭所有文件对象
                 for file_obj in file_objects:
@@ -222,12 +249,14 @@ async def upload_media_group():
                                 )
                                 logger.info(f"成功！使用file_id发送了 {len(result)} 个媒体项目")
                             except Exception as e:
-                                logger.error(f"使用file_id发送失败: {str(e)}")
+                                # 使用repr()确保完整错误信息被记录，避免截断
+                                logger.error(f"使用file_id发送失败: {repr(e)}")
                     else:
                         logger.error("无法获取视频file_id")
                 
                 except Exception as e:
-                    logger.error(f"处理视频文件时出错: {str(e)}")
+                    # 使用repr()确保完整错误信息被记录，避免截断
+                    logger.error(f"处理视频文件时出错: {repr(e)}")
             else:
                 logger.warning("没有找到视频文件，跳过测试方法3")
             
@@ -267,14 +296,16 @@ async def upload_media_group():
                     logger.info(f"成功！使用安全参数发送了 {len(result)} 个媒体项目")
                     
                 except Exception as e:
-                    logger.error(f"使用安全参数发送失败: {str(e)}")
+                    # 使用repr()确保完整错误信息被记录，避免截断
+                    logger.error(f"使用安全参数发送失败: {repr(e)}")
             else:
                 logger.warning("没有找到照片文件，跳过测试方法4")
             
             logger.info("测试完成")
             
         except Exception as e:
-            logger.error(f"发生错误: {str(e)}")
+            # 使用repr()确保完整错误信息被记录，避免截断
+            logger.error(f"发生错误: {repr(e)}")
 
 if __name__ == "__main__":
     asyncio.run(upload_media_group()) 
