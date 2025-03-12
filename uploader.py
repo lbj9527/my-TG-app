@@ -7,13 +7,16 @@
 import os
 import asyncio
 import configparser
-import logging
 import subprocess
 import json
 from pyrogram import Client
 from pyrogram.types import InputMediaPhoto, InputMediaVideo
 
-logger = logging.getLogger("MediaUploader")
+# 将logging替换为tg_forwarder的日志系统
+from tg_forwarder.utils.logger import get_logger
+
+# 使用与主应用相同的日志系统
+logger = get_logger("uploader")
 
 class Uploader:
     """
@@ -334,7 +337,9 @@ class Uploader:
         2. 将符合要求的文件分批（每批不超过10个）发送到所有目标频道
         3. 将不符合要求的文件单独发送到所有目标频道
         """
-        logger.info("开始上传媒体文件...")
+        logger.info("========== 开始上传媒体文件 ==========")
+        logger.info(f"配置信息: 目标频道: {self.target_channels}")
+        logger.info(f"临时文件夹: {self.temp_folder}")
         
         # 确保临时文件夹存在
         if not os.path.exists(self.temp_folder):
@@ -357,21 +362,33 @@ class Uploader:
         
         try:
             # 连接客户端
+            logger.info("正在连接到Telegram...")
             await self.client.start()
+            logger.info("成功连接到Telegram")
             
             # 列出并过滤支持的媒体文件
+            logger.info(f"正在扫描临时文件夹: {self.temp_folder}")
             media_files = [f for f in os.listdir(self.temp_folder) if os.path.isfile(os.path.join(self.temp_folder, f))]
             
             if not media_files:
                 logger.error(f"临时文件夹中没有文件: {self.temp_folder}")
+                logger.info("请确保下载功能已启用并正确配置")
                 await self.client.stop()
                 return False
             
+            logger.info(f"在临时文件夹中找到 {len(media_files)} 个文件")
+            
             # 过滤出支持的媒体文件类型
             supported_files = []
+            unsupported_files = []
             for filename in media_files:
                 if filename.endswith(('.jpg', '.jpeg', '.png', '.mp4', '.mov', '.avi')):
                     supported_files.append(filename)
+                else:
+                    unsupported_files.append(filename)
+            
+            if unsupported_files:
+                logger.info(f"跳过 {len(unsupported_files)} 个不支持的文件: {', '.join(unsupported_files[:5])}{' 等' if len(unsupported_files) > 5 else ''}")
             
             if not supported_files:
                 logger.error(f"未找到支持的媒体文件类型，只支持jpg、jpeg、png、mp4、mov、avi")
@@ -419,14 +436,26 @@ class Uploader:
                 for channel, sent_files in results.items():
                     logger.info(f"单独发送，频道{channel}成功发送: {sent_files}")
             
-            logger.info("所有媒体文件上传完成")
+            # 添加总结信息
+            logger.info("========== 媒体文件上传完成 ==========")
+            logger.info(f"上传统计: 总文件数 {len(supported_files)}")
+            if 'compatible_files' in locals():
+                logger.info(f"媒体组上传: {len(compatible_files)} 个文件")
+            if 'incompatible_files' in locals():
+                logger.info(f"单独上传: {len(incompatible_files)} 个文件")
+            
             await self.client.stop()
+            logger.info("已断开与Telegram的连接")
             return True
             
         except Exception as e:
             logger.error(f"上传过程中发生错误: {repr(e)}")
+            # 添加更详细的错误信息
+            import traceback
+            logger.error(f"错误详情: {traceback.format_exc()}")
             if self.client:
                 await self.client.stop()
+                logger.info("已断开与Telegram的连接")
             return False
     
     @classmethod

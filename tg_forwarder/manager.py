@@ -5,6 +5,8 @@
 import asyncio
 from typing import Dict, Any, Optional, List, Union, Tuple
 import logging
+import sys
+import os
 
 from tg_forwarder.config import Config
 from tg_forwarder.client import TelegramClient
@@ -13,13 +15,13 @@ from tg_forwarder.media_handler import MediaHandler
 from tg_forwarder.forwarder import MessageForwarder
 from tg_forwarder.utils.logger import setup_logger, get_logger
 
-# 导入上传类
-import sys
-import os
+# 获取日志记录器
+logger = get_logger("manager")
+
+# 导入上传类（在日志设置之后导入）
+# 确保uploader.py所在的目录在导入路径中
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from uploader import Uploader
-
-logger = get_logger("manager")
 
 class ForwardManager:
     """转发管理器类，负责协调整个转发流程"""
@@ -126,12 +128,20 @@ class ForwardManager:
                 # 检查下载配置
                 download_config = self.config.get_download_config()
                 if download_config.get("enabled", False):
-                    logger.info("开始下载转发的媒体文件...")
-                    # 调用下载器下载媒体文件
-                    download_results = await self.downloader.download_forwarded_messages(result["forwarded_messages"])
-                    # 将下载结果添加到转发结果中
-                    result["download_results"] = download_results
-                    logger.info(f"媒体文件下载完成，保存到: {download_config['temp_folder']}")
+                    logger.info("开始下载源频道中的媒体文件...")
+                    try:
+                        # 从源频道直接下载指定范围内的消息
+                        download_results = await self.downloader.download_messages_from_source(
+                            source_identifier, 
+                            start_message_id, 
+                            end_message_id
+                        )
+                        # 将下载结果添加到转发结果中
+                        result["download_results"] = download_results
+                        logger.info(f"媒体文件下载完成，保存到: {download_config['temp_folder']}")
+                    except Exception as e:
+                        logger.error(f"下载媒体文件时出错: {repr(e)}")
+                        result["download_error"] = str(e)
                 else:
                     logger.info("媒体文件下载功能未启用，跳过下载")
                 
@@ -140,6 +150,10 @@ class ForwardManager:
                 if upload_config.get("enabled", False) and upload_config.get("upload_after_forward", True):
                     logger.info("开始上传本地媒体文件...")
                     try:
+                        # 添加更多上传前的日志信息
+                        logger.info(f"上传配置: 临时文件夹={upload_config.get('temp_folder', 'temp')}")
+                        logger.info(f"目标频道: {', '.join(target_identifiers)}")
+                        
                         # 调用Uploader上传媒体文件
                         upload_success = await Uploader.create_and_upload(self.config_path)
                         if upload_success:

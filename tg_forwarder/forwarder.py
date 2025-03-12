@@ -36,6 +36,38 @@ class MessageForwarder:
         self.hide_author = config.get('hide_author', False)
         self.delay = config.get('delay', 1)
         self.batch_size = config.get('batch_size', 100)
+        self.skip_emoji_messages = config.get('skip_emoji_messages', False)
+    
+    def has_emoji(self, text: str) -> bool:
+        """
+        检测文本是否包含Emoji
+        
+        Args:
+            text: 要检测的文本
+        
+        Returns:
+            bool: 如果包含Emoji返回True，否则返回False
+        """
+        import re
+        
+        # Emoji表情的Unicode范围
+        emoji_pattern = re.compile(
+            "["
+            "\U0001F600-\U0001F64F"  # 表情符号
+            "\U0001F300-\U0001F5FF"  # 符号和象形文字
+            "\U0001F680-\U0001F6FF"  # 交通和地图符号
+            "\U0001F700-\U0001F77F"  # 字母符号
+            "\U0001F780-\U0001F7FF"  # 几何形状
+            "\U0001F800-\U0001F8FF"  # 箭头符号
+            "\U0001F900-\U0001F9FF"  # 补充符号和象形文字
+            "\U0001FA00-\U0001FA6F"  # 扩展符号
+            "\U0001FA70-\U0001FAFF"  # 扩展符号和象形文字
+            "\U00002702-\U000027B0"  # 装饰符号
+            "\U000024C2-\U0001F251" 
+            "]+"
+        )
+        
+        return bool(emoji_pattern.search(text if text else ""))
     
     async def forward_message(self, source_message: Message, target_channels: List[Union[str, int]]) -> Dict[str, List[Optional[Message]]]:
         """
@@ -80,6 +112,13 @@ class MessageForwarder:
         """
         results = defaultdict(list)
         
+        # 检查媒体组中是否有含Emoji的消息
+        if self.skip_emoji_messages:
+            for msg in media_group:
+                if msg.caption and self.has_emoji(msg.caption):
+                    logger.info(f"跳过包含Emoji的媒体组消息: {msg.id} (媒体组ID: {msg.media_group_id})")
+                    return results
+
         for target_id in target_channels:
             logger.info(f"正在转发媒体组 {media_group[0].media_group_id} 到目标频道 (ID: {target_id})")
             
@@ -164,6 +203,7 @@ class MessageForwarder:
             "text_messages": 0,
             "media_messages": 0,
             "skipped": 0,
+            "skipped_emoji": 0,
             "start_time": time.time()
         }
         
@@ -179,6 +219,13 @@ class MessageForwarder:
         for msg in messages:
             if msg is None:
                 stats["skipped"] += 1
+                continue
+            
+            # 检查消息是否包含Emoji并根据配置决定是否跳过
+            if self.skip_emoji_messages and msg.text and self.has_emoji(msg.text):
+                logger.info(f"跳过包含Emoji的消息: {msg.id}")
+                stats["skipped"] += 1
+                stats["skipped_emoji"] += 1
                 continue
             
             if msg.media_group_id:
@@ -272,6 +319,8 @@ class MessageForwarder:
         stats["forwarded_messages"] = dict(forwarded_messages)
         
         logger.info(f"消息处理完成: 总数 {stats['total']}, 处理 {stats['processed']}, 成功 {stats['success']}, 失败 {stats['failed']}, 跳过 {stats['skipped']}")
+        if stats["skipped_emoji"] > 0:
+            logger.info(f"跳过的Emoji消息数: {stats['skipped_emoji']}")
         logger.info(f"耗时: {stats['duration']:.2f}秒")
         
         return stats

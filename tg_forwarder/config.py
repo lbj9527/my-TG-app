@@ -104,6 +104,7 @@ class Config:
             'hide_author': self.config.getboolean('FORWARD', 'hide_author', fallback=False),
             'delay': self.config.getfloat('FORWARD', 'delay', fallback=1),
             'batch_size': self.config.getint('FORWARD', 'batch_size', fallback=100),
+            'skip_emoji_messages': self.config.getboolean('FORWARD', 'skip_emoji_messages', fallback=False),
         }
         
         return forward_config

@@ -357,147 +357,138 @@ class MediaDownloader:
     
     async def download_forwarded_messages(self, forward_results: Dict[str, List[Message]]) -> Dict[str, Dict[int, Optional[str]]]:
         """
-        下载转发结果中的所有媒体文件
+        下载已转发的消息中的媒体文件
         
-        参数:
-            forward_results: 转发结果，格式为 {目标频道: [转发的消息]}
+        Args:
+            forward_results: 转发结果字典，键为目标聊天ID，值为消息列表
             
-        返回:
-            Dict[str, Dict[int, Optional[str]]]: 下载结果，格式为 {目标频道: {消息ID: 文件路径}}
+        Returns:
+            Dict[str, Dict[int, Optional[str]]]: 下载结果
         """
-        # 去重：创建一个字典来跟踪已处理的文件
-        # 键是文件的唯一标识符，值是下载的路径
-        downloaded_files = {}
+        result = {}
         
-        # 收集所有唯一的媒体消息
-        all_messages = []
-        seen_file_ids = set()  # 使用set来跟踪已处理的文件ID
-        
-        # 首先，收集每个转发目标中第一个目标频道的所有消息
-        # 只处理第一个目标频道的消息，避免重复下载
-        if forward_results:
-            first_target = next(iter(forward_results.keys()))
-            messages = forward_results[first_target]
+        for chat_id, messages in forward_results.items():
+            chat_result = {}
+            logger.info(f"准备下载聊天 {chat_id} 中的 {len(messages)} 条消息的媒体...")
             
-            logger.info(f"只从第一个目标频道 {first_target} 收集媒体文件，共 {len(messages)} 条消息")
+            # 按媒体组分组
+            media_groups = {}
+            single_messages = []
             
             for msg in messages:
-                # 跳过非媒体消息
-                if not msg.media:
-                    continue
-                
-                # 获取文件的唯一ID
-                file_unique_id = None
-                try:
-                    if msg.photo:
-                        file_unique_id = msg.photo.file_unique_id
-                    elif msg.video:
-                        file_unique_id = msg.video.file_unique_id
-                    elif msg.document:
-                        file_unique_id = msg.document.file_unique_id
-                    elif msg.audio:
-                        file_unique_id = msg.audio.file_unique_id
-                    elif msg.voice:
-                        file_unique_id = msg.voice.file_unique_id
-                except ValueError as e:
-                    if "Peer id invalid" in str(e):
-                        logger.warning(f"获取文件ID时遇到无效的Peer ID错误，跳过此消息: {msg.id}")
-                        continue
-                    raise
-                
-                # 如果无法获取文件ID或已处理过，跳过
-                if not file_unique_id or file_unique_id in seen_file_ids:
-                    continue
-                
-                seen_file_ids.add(file_unique_id)
-                all_messages.append(msg)
-        
-        # 如果没有媒体消息，直接返回
-        if not all_messages:
-            logger.info("没有发现需要下载的媒体文件")
-            return {target: {} for target in forward_results.keys()}
-            
-        logger.info(f"开始下载所有唯一媒体文件，共 {len(all_messages)} 个")
-        
-        # 下载所有唯一的媒体文件
-        download_results = {}
-        
-        # 将消息分组，媒体组放在一起处理
-        grouped_messages = {}  # {media_group_id: [messages]}
-        individual_messages = []
-        
-        for msg in all_messages:
-            try:
                 if msg.media_group_id:
-                    if msg.media_group_id not in grouped_messages:
-                        grouped_messages[msg.media_group_id] = []
-                    grouped_messages[msg.media_group_id].append(msg)
+                    if msg.media_group_id not in media_groups:
+                        media_groups[msg.media_group_id] = []
+                    media_groups[msg.media_group_id].append(msg)
                 else:
-                    individual_messages.append(msg)
-            except ValueError as e:
-                if "Peer id invalid" in str(e):
-                    logger.warning(f"处理消息分组时遇到无效的Peer ID错误，跳过此消息: {msg.id}")
-                    continue
-                raise
-        
-        # 下载媒体组
-        for group_id, group_messages in grouped_messages.items():
-            try:
+                    single_messages.append(msg)
+            
+            # 下载媒体组消息
+            for group_id, group_messages in media_groups.items():
                 group_results = await self.download_media_group(group_messages)
-                for msg_id, file_path in group_results.items():
-                    if file_path:
-                        # 记录下载的文件路径
-                        downloaded_files[msg_id] = file_path
-            except ValueError as e:
-                if "Peer id invalid" in str(e):
-                    logger.warning(f"下载媒体组时遇到无效的Peer ID错误，跳过此组: {group_id}")
-                    continue
-                raise
-            except Exception as e:
-                logger.error(f"下载媒体组时出错: {str(e)}")
-                continue
-        
-        # 下载单个消息
-        for msg in individual_messages:
-            try:
+                chat_result.update(group_results)
+            
+            # 下载单独消息
+            for msg in single_messages:
                 file_path = await self.download_media_from_message(msg)
-                if file_path:
-                    downloaded_files[msg.id] = file_path
-            except ValueError as e:
-                if "Peer id invalid" in str(e):
-                    logger.warning(f"下载单个消息时遇到无效的Peer ID错误，跳过此消息: {msg.id}")
-                    continue
-                raise
-            except Exception as e:
-                logger.error(f"下载单个消息时出错: {str(e)}")
-                continue
+                chat_result[msg.id] = file_path
+            
+            result[chat_id] = chat_result
         
-        # 将下载结果与每个目标频道关联
-        for target in forward_results.keys():
-            download_results[target] = {}
-            for msg in forward_results[target]:
-                try:
-                    if msg.media and msg.id in downloaded_files:
-                        download_results[target][msg.id] = downloaded_files[msg.id]
-                    elif msg.media and hasattr(msg, 'media_group_id') and msg.media_group_id and any(m.id in downloaded_files for m in forward_results[target] if hasattr(m, 'media_group_id') and m.media_group_id == msg.media_group_id):
-                        # 对于媒体组，找一个已下载的成员
-                        for m in forward_results[target]:
-                            if hasattr(m, 'media_group_id') and m.media_group_id == msg.media_group_id and m.id in downloaded_files:
-                                download_results[target][msg.id] = downloaded_files[m.id]
-                                break
-                except ValueError as e:
-                    if "Peer id invalid" in str(e):
-                        logger.warning(f"关联下载结果时遇到无效的Peer ID错误，跳过此消息: {msg.id}")
+        return result
+    
+    async def download_messages_from_source(self, source_chat_id, start_message_id, end_message_id) -> Dict[int, Optional[str]]:
+        """
+        直接从源频道下载指定范围内的媒体消息
+        
+        Args:
+            source_chat_id: 源聊天/频道的ID
+            start_message_id: 起始消息ID
+            end_message_id: 结束消息ID
+            
+        Returns:
+            Dict[int, Optional[str]]: 消息ID到下载文件路径的映射
+        """
+        result = {}
+        
+        try:
+            logger.info(f"准备从源频道 {source_chat_id} 下载消息范围 {start_message_id} 到 {end_message_id} 的媒体...")
+            
+            # 设置默认的结束消息ID
+            if not end_message_id or end_message_id <= 0:
+                # 获取最新消息ID
+                latest_id = await self.client.get_latest_message_id(source_chat_id)
+                if not latest_id:
+                    logger.error(f"无法获取源频道的最新消息ID: {source_chat_id}")
+                    return result
+                
+                end_message_id = latest_id
+                logger.info(f"已获取最新消息ID作为结束ID: {end_message_id}")
+            
+            # 设置默认的起始消息ID
+            if not start_message_id or start_message_id <= 0:
+                # 如果没有指定起始ID，使用默认值（最新消息ID - 8）
+                start_message_id = max(1, end_message_id - 8)
+                logger.info(f"未指定起始消息ID，将从ID={start_message_id}开始")
+            
+            # 消息ID列表
+            message_ids = list(range(start_message_id, end_message_id + 1))
+            total_messages = len(message_ids)
+            
+            # 媒体组消息的缓存，避免重复处理
+            processed_media_groups = set()
+            
+            # 使用get_messages_range方法获取消息
+            try:
+                logger.info(f"获取消息范围: {start_message_id}-{end_message_id}")
+                messages = await self.client.get_messages_range(source_chat_id, start_message_id, end_message_id)
+                
+                # 按媒体组分组
+                media_groups = {}
+                single_messages = []
+                
+                for msg in messages:
+                    # 跳过非媒体消息
+                    if not msg or not self._get_media_type(msg):
                         continue
-                    raise
-                except Exception as e:
-                    logger.error(f"关联下载结果时出错: {str(e)}, 消息ID: {msg.id}")
-                    continue
+                        
+                    # 处理媒体组消息
+                    if msg.media_group_id:
+                        if msg.media_group_id not in processed_media_groups:
+                            if msg.media_group_id not in media_groups:
+                                media_groups[msg.media_group_id] = []
+                            media_groups[msg.media_group_id].append(msg)
+                    else:
+                        single_messages.append(msg)
+                
+                # 处理媒体组
+                for group_id, group_messages in media_groups.items():
+                    try:
+                        logger.info(f"下载媒体组 {group_id} 中的 {len(group_messages)} 个媒体文件")
+                        # 直接使用已获取的媒体组消息
+                        group_results = await self.download_media_group(group_messages)
+                        result.update(group_results)
+                        processed_media_groups.add(group_id)
+                    except Exception as e:
+                        logger.error(f"下载媒体组 {group_id} 时出错: {str(e)}")
+                
+                # 下载单独消息
+                for msg in single_messages:
+                    try:
+                        file_path = await self.download_media_from_message(msg)
+                        if file_path:
+                            result[msg.id] = file_path
+                    except Exception as e:
+                        logger.error(f"下载消息 {msg.id} 时出错: {str(e)}")
+            
+            except Exception as e:
+                logger.error(f"获取消息范围时出错: {str(e)}")
+        
+        except Exception as e:
+            logger.error(f"从源频道下载消息时出错: {str(e)}")
         
         # 统计下载结果
-        total_unique_files = len(all_messages)
-        total_success = len([f for f in downloaded_files.values() if f is not None])
+        success_count = sum(1 for path in result.values() if path)
+        logger.info(f"从源频道下载完成。总消息数: {total_messages}，成功下载媒体: {success_count}")
         
-        logger.info(f"媒体下载完成: 共 {total_unique_files} 个唯一文件, 成功下载 {total_success} 个")
-        
-        return download_results 
+        return result 
