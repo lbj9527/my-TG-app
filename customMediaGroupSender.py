@@ -13,7 +13,7 @@ from typing import List, Dict, Tuple, Any, Optional, Callable
 from datetime import datetime
 
 from pyrogram import Client
-from pyrogram.types import InputMediaPhoto, InputMediaVideo, InputMediaDocument
+from pyrogram.types import InputMediaPhoto, InputMediaVideo, InputMediaDocument, Message
 from pyrogram.errors import FloodWait
 
 # 引入colorama库支持彩色终端输出
@@ -313,13 +313,13 @@ class UploadProgressTracker:
                 f"进度: {Fore.MAGENTA}{self.uploaded_files}/{self.total_files}文件{Style.RESET_ALL}"
             )
         else:
-        logger.info(
+            logger.info(
                 f"文件完成: {short_name} | "
                 f"大小: {format_size(self.current_file_size)} | "
                 f"用时: {elapsed:.2f}秒 | "
                 f"平均速度: {format_size(speed)}/s | "
                 f"进度: {self.uploaded_files}/{self.total_files}文件"
-        )
+            )
     
     def complete_all(self):
         """完成所有文件上传"""
@@ -341,13 +341,13 @@ class UploadProgressTracker:
                 f"平均速度: {Fore.YELLOW}{format_size(avg_speed)}/s{Style.RESET_ALL}"
             )
         else:
-        logger.info(
+            logger.info(
                 f"全部完成 | "
                 f"共 {self.uploaded_files} 个文件 | "
                 f"总大小: {format_size(self.uploaded_size)} | "
                 f"总用时: {total_elapsed:.2f}秒 | "
-            f"平均速度: {format_size(avg_speed)}/s"
-        )
+                f"平均速度: {format_size(avg_speed)}/s"
+            )
 
 def format_size(size_bytes: int) -> str:
     """格式化文件大小显示"""
@@ -456,7 +456,7 @@ class CustomMediaGroupSender:
         mime_type = mimetypes.guess_type(file_path)[0] or ""
         
         if tracker:
-        tracker.start_file(file_name, file_size)
+            tracker.start_file(file_name, file_size)
         
         try:
             # 创建一个临时聊天ID，用于获取文件ID
@@ -506,11 +506,16 @@ class CustomMediaGroupSender:
             logger.error(f"上传文件 {file_name} 失败: {str(e)}")
             return None
     
-    async def send_media_group_with_progress(self, chat_id: str, file_paths: List[str]) -> bool:
-        """发送媒体组，带进度显示"""
+    async def send_media_group_with_progress(self, chat_id: str, file_paths: List[str]) -> Tuple[bool, List[Message]]:
+        """
+        发送媒体组，带进度显示
+        
+        返回值:
+            Tuple[bool, List[Message]]: 发送是否成功, 及发送成功的消息列表
+        """
         if not file_paths:
             logger.warning("没有提供任何文件路径")
-            return False
+            return False, []
             
         # 计算总文件大小
         total_size = sum(os.path.getsize(path) for path in file_paths)
@@ -529,7 +534,7 @@ class CustomMediaGroupSender:
                  colour='magenta' if not COLORAMA_AVAILABLE else None) if TQDM_AVAILABLE else None as file_pbar:
             # 上传所有文件并获取文件ID
             media_list = []
-        for file_path in file_paths:
+            for file_path in file_paths:
                 file_name = os.path.basename(file_path)
                 mime_type = mimetypes.guess_type(file_path)[0] or ""
                 
@@ -564,9 +569,10 @@ class CustomMediaGroupSender:
         # 检查是否有成功上传的媒体
         if not media_list:
             logger.error("没有成功上传任何媒体文件，无法发送媒体组")
-            return False
+            return False, []
             
         # 发送媒体组
+        sent_messages = []
         try:
             # 分批发送（Telegram限制每组最多10个媒体）
             batch_size = 10
@@ -584,10 +590,11 @@ class CustomMediaGroupSender:
                     logger.info(f"发送媒体组批次 {batch_num}/{batch_count} (包含 {len(batch)} 个文件)")
                     
                     try:
-                        await self.client.send_media_group(
+                        batch_messages = await self.client.send_media_group(
                             chat_id=chat_id,
                             media=batch
                         )
+                        sent_messages.extend(batch_messages)
                         logger.info(f"批次 {batch_num}/{batch_count} 发送成功")
                         
                     except FloodWait as e:
@@ -606,10 +613,11 @@ class CustomMediaGroupSender:
                             await asyncio.sleep(e.value)
                         
                         # 重试
-                        await self.client.send_media_group(
+                        batch_messages = await self.client.send_media_group(
                             chat_id=chat_id,
                             media=batch
                         )
+                        sent_messages.extend(batch_messages)
                         logger.info(f"批次 {batch_num}/{batch_count} 重试发送成功")
                     
                     except ValueError as e:
@@ -624,7 +632,7 @@ class CustomMediaGroupSender:
                                 logger.warning(f"频道ID {peer_info} 解析问题，但上传仍将继续")
                         else:
                             logger.error(f"批次 {batch_num}/{batch_count} 发送失败: {str(e)}")
-                            return False    
+                            return False, sent_messages    
                         
                     except Exception as e:
                         # 简化错误信息，只显示主要部分
@@ -632,7 +640,7 @@ class CustomMediaGroupSender:
                         if len(error_msg) > 100:
                             error_msg = error_msg[:100] + "..."
                         logger.error(f"批次 {batch_num}/{batch_count} 发送失败: {error_msg}")
-                        return False
+                        return False, sent_messages
                         
                     # 批次之间添加短暂延迟，避免触发频率限制
                     if batch_num < batch_count:
@@ -642,44 +650,202 @@ class CustomMediaGroupSender:
                     if TQDM_AVAILABLE and batch_pbar:
                         batch_pbar.update(1)
             
-        tracker.complete_all()
-        
+            tracker.complete_all()
+            
             logger.info(f"媒体组发送完成: {len(media_list)}/{len(file_paths)} 成功")
-            return True
+            return True, sent_messages
             
         except Exception as e:
             logger.error(f"发送媒体组失败: {str(e)}")
+            return False, sent_messages
+    
+    async def forward_media_messages(self, from_chat_id: str, to_chat_id: str, messages: List[Message]) -> bool:
+        """
+        将媒体消息从一个频道转发到另一个频道
+        
+        参数:
+            from_chat_id: 源频道ID
+            to_chat_id: 目标频道ID
+            messages: 要转发的消息列表
+            
+        返回:
+            bool: 转发是否成功
+        """
+        if not messages:
+            logger.warning("没有提供要转发的消息")
+            return False
+            
+        try:
+            # 分批转发（每批最多10个消息）
+            batch_size = 10
+            batches = [messages[i:i+batch_size] for i in range(0, len(messages), batch_size)]
+            
+            if COLORAMA_AVAILABLE:
+                logger.info(f"{Fore.CYAN}开始从 {from_chat_id} 转发 {len(messages)} 条消息到 {to_chat_id}{Style.RESET_ALL}")
+            else:
+                logger.info(f"开始从 {from_chat_id} 转发 {len(messages)} 条消息到 {to_chat_id}")
+                
+            # 创建转发进度条
+            forward_desc = "转发消息" if not COLORAMA_AVAILABLE else f"{Fore.BLUE}转发消息{Style.RESET_ALL}"
+            with tqdm(total=len(batches), desc=forward_desc, unit="批", position=2,
+                     bar_format=BATCH_BAR_FORMAT,
+                     colour='blue' if not COLORAMA_AVAILABLE else None) if TQDM_AVAILABLE else None as forward_pbar:
+                
+                for i, batch in enumerate(batches):
+                    try:
+                        message_ids = [msg.id for msg in batch]
+                        
+                        # 使用Pyrogram的forward_messages方法
+                        await self.client.forward_messages(
+                            chat_id=to_chat_id,
+                            from_chat_id=from_chat_id,
+                            message_ids=message_ids
+                        )
+                        
+                        if COLORAMA_AVAILABLE:
+                            logger.info(f"{Fore.GREEN}成功转发批次 {i+1}/{len(batches)} ({len(batch)} 条消息){Style.RESET_ALL}")
+                        else:
+                            logger.info(f"成功转发批次 {i+1}/{len(batches)} ({len(batch)} 条消息)")
+                            
+                    except FloodWait as e:
+                        logger.warning(f"转发时遇到频率限制，等待 {e.value} 秒后重试")
+                        
+                        # 使用tqdm显示等待倒计时
+                        if TQDM_AVAILABLE:
+                            wait_desc = "等待限制解除" if not COLORAMA_AVAILABLE else f"{Fore.RED}等待限制解除{Style.RESET_ALL}"
+                            with tqdm(total=e.value, desc=wait_desc, unit="秒", 
+                                     bar_format=WAIT_BAR_FORMAT,
+                                     colour='red' if not COLORAMA_AVAILABLE else None) as wait_pbar:
+                                for _ in range(e.value):
+                                    await asyncio.sleep(1)
+                                    wait_pbar.update(1)
+                        else:
+                            await asyncio.sleep(e.value)
+                            
+                        # 重试转发
+                        await self.client.forward_messages(
+                            chat_id=to_chat_id,
+                            from_chat_id=from_chat_id,
+                            message_ids=message_ids
+                        )
+                        
+                        if COLORAMA_AVAILABLE:
+                            logger.info(f"{Fore.GREEN}重试后成功转发批次 {i+1}/{len(batches)} ({len(batch)} 条消息){Style.RESET_ALL}")
+                        else:
+                            logger.info(f"重试后成功转发批次 {i+1}/{len(batches)} ({len(batch)} 条消息)")
+                    
+                    except Exception as e:
+                        error_msg = str(e)
+                        if len(error_msg) > 100:
+                            error_msg = error_msg[:100] + "..."
+                        logger.error(f"转发批次 {i+1}/{len(batches)} 失败: {error_msg}")
+                        return False
+                        
+                    # 批次之间添加短暂延迟，避免触发频率限制
+                    if i < len(batches) - 1:
+                        await asyncio.sleep(1)
+                        
+                    # 更新转发进度条
+                    if TQDM_AVAILABLE and forward_pbar:
+                        forward_pbar.update(1)
+                        
+            if COLORAMA_AVAILABLE:
+                logger.info(f"{Fore.GREEN}{Style.BRIGHT}所有消息转发完成! {from_chat_id} -> {to_chat_id}{Style.RESET_ALL}")
+            else:
+                logger.info(f"所有消息转发完成! {from_chat_id} -> {to_chat_id}")
+                
+            return True
+            
+        except Exception as e:
+            logger.error(f"转发消息时出错: {str(e)}")
             return False
     
-    async def send_to_all_channels(self, file_paths: List[str]) -> Dict[str, bool]:
-        """发送媒体组到所有目标频道"""
+    async def send_to_all_channels(self, file_paths_groups: List[List[str]]) -> Dict[str, bool]:
+        """
+        发送媒体组到所有目标频道
+        
+        参数:
+            file_paths_groups: 文件路径组列表，每个子列表是一组要发送的文件
+            
+        返回:
+            Dict[str, bool]: 发送结果，键为频道ID，值为是否所有文件组都发送成功
+        """
         if not self.target_channels:
             logger.error("没有设置目标频道")
             return {}
             
-        results = {}
+        results = {channel: True for channel in self.target_channels}
         
         # 创建频道发送进度条
-        channel_desc = "发送到频道" if not COLORAMA_AVAILABLE else f"{Fore.CYAN}发送到频道{Style.RESET_ALL}"
+        channel_desc = "处理频道" if not COLORAMA_AVAILABLE else f"{Fore.CYAN}处理频道{Style.RESET_ALL}"
         with tqdm(total=len(self.target_channels), desc=channel_desc, unit="个", position=0,
                  bar_format=TOTAL_BAR_FORMAT,
                  colour='cyan' if not COLORAMA_AVAILABLE else None) if TQDM_AVAILABLE else None as channel_pbar:
-        for channel in self.target_channels:
+            
+            # 处理每一组文件
+            for group_index, file_paths in enumerate(file_paths_groups):
+                if COLORAMA_AVAILABLE:
+                    logger.info(f"{Fore.YELLOW}{Style.BRIGHT}处理文件组 {group_index+1}/{len(file_paths_groups)} ({len(file_paths)} 个文件){Style.RESET_ALL}")
+                else:
+                    logger.info(f"处理文件组 {group_index+1}/{len(file_paths_groups)} ({len(file_paths)} 个文件)")
+                
+                if not file_paths:
+                    logger.warning(f"文件组 {group_index+1} 中没有文件，跳过")
+                    continue
+                
+                # 获取第一个目标频道
+                first_channel = self.target_channels[0]
+                
                 # 彩色日志
                 if COLORAMA_AVAILABLE:
-                    logger.info(f"{Fore.CYAN}{Style.BRIGHT}开始向频道 {channel} 发送媒体组{Style.RESET_ALL}")
+                    logger.info(f"{Fore.CYAN}{Style.BRIGHT}开始向第一个频道 {first_channel} 发送媒体组{Style.RESET_ALL}")
                 else:
-            logger.info(f"开始向频道 {channel} 发送媒体组")
-                    
-            success = await self.send_media_group_with_progress(channel, file_paths)
-            results[channel] = success
+                    logger.info(f"开始向第一个频道 {first_channel} 发送媒体组")
                 
-                # 更新频道进度条
-                if TQDM_AVAILABLE and channel_pbar:
-                    channel_pbar.update(1)
+                # 向第一个频道发送
+                success, sent_messages = await self.send_media_group_with_progress(first_channel, file_paths)
+                results[first_channel] = results[first_channel] and success
+                
+                # 如果第一个频道发送成功并且有其他频道，则通过转发发送到其他频道
+                if success and sent_messages and len(self.target_channels) > 1:
+                    if COLORAMA_AVAILABLE:
+                        logger.info(f"{Fore.GREEN}第一个频道发送成功，开始向其他 {len(self.target_channels)-1} 个频道转发{Style.RESET_ALL}")
+                    else:
+                        logger.info(f"第一个频道发送成功，开始向其他 {len(self.target_channels)-1} 个频道转发")
+                    
+                    # 转发到其他频道
+                    for i, channel in enumerate(self.target_channels[1:], 1):
+                        if COLORAMA_AVAILABLE:
+                            logger.info(f"{Fore.BLUE}开始向频道 {channel} 转发 ({i}/{len(self.target_channels)-1}){Style.RESET_ALL}")
+                        else:
+                            logger.info(f"开始向频道 {channel} 转发 ({i}/{len(self.target_channels)-1})")
+                            
+                        forward_success = await self.forward_media_messages(first_channel, channel, sent_messages)
+                        results[channel] = results[channel] and forward_success
+                        
+                # 如果第一个频道发送失败或者为空，尝试逐个发送到每个频道
+                elif (not success or not sent_messages) and len(self.target_channels) > 1:
+                    if COLORAMA_AVAILABLE:
+                        logger.warning(f"{Fore.YELLOW}第一个频道发送失败或未发送消息，将尝试单独发送到每个频道{Style.RESET_ALL}")
+                    else:
+                        logger.warning(f"第一个频道发送失败或未发送消息，将尝试单独发送到每个频道")
+                    
+                    # 单独发送到其他频道
+                    for i, channel in enumerate(self.target_channels[1:], 1):
+                        if COLORAMA_AVAILABLE:
+                            logger.info(f"{Fore.CYAN}开始向频道 {channel} 发送媒体组 ({i}/{len(self.target_channels)-1}){Style.RESET_ALL}")
+                        else:
+                            logger.info(f"开始向频道 {channel} 发送媒体组 ({i}/{len(self.target_channels)-1})")
+                            
+                        channel_success, _ = await self.send_media_group_with_progress(channel, file_paths)
+                        results[channel] = results[channel] and channel_success
+                
+            # 更新频道进度条
+            if TQDM_AVAILABLE and channel_pbar:
+                channel_pbar.update(len(self.target_channels))
             
         return results
-        
+
 async def main():
     """主函数"""
     # 处理命令行参数
@@ -795,14 +961,20 @@ async def main():
             logger.error(f"在 {sender.temp_folder} 文件夹中没有找到媒体文件")
             return
         
-        # 发送媒体组
-        logger.info(f"准备发送 {len(media_files)} 个文件到 {len(sender.target_channels)} 个频道")
+        # 将媒体文件分组，每组最多10个（Telegram媒体组限制）
+        batch_size = 10
+        media_groups = [media_files[i:i+batch_size] for i in range(0, len(media_files), batch_size)]
+        
+        if COLORAMA_AVAILABLE:
+            logger.info(f"{Fore.YELLOW}准备发送 {len(media_files)} 个文件到 {len(sender.target_channels)} 个频道，分为 {len(media_groups)} 组{Style.RESET_ALL}")
+        else:
+            logger.info(f"准备发送 {len(media_files)} 个文件到 {len(sender.target_channels)} 个频道，分为 {len(media_groups)} 组")
         
         # 记录开始时间
         start_time = time.time()
         
         # 发送媒体
-        results = await sender.send_to_all_channels(media_files)
+        results = await sender.send_to_all_channels(media_groups)
         
         # 计算总耗时
         elapsed_time = time.time() - start_time
@@ -871,7 +1043,7 @@ if __name__ == "__main__":
     
     # 运行主函数
     try:
-    asyncio.run(main()) 
+        asyncio.run(main()) 
     except KeyboardInterrupt:
         if COLORAMA_AVAILABLE:
             print(f"\n{Fore.YELLOW}⚠️ 程序被用户中断{Style.RESET_ALL}")
