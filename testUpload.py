@@ -8,8 +8,10 @@ import os
 import asyncio
 import configparser
 from pyrogram import Client
-from pyrogram.types import InputMediaPhoto, InputMediaVideo, InputMediaDocument
+from pyrogram.types import InputMediaPhoto, InputMediaVideo
 import logging
+import subprocess
+import json
 
 # 设置日志系统
 # 创建一个过滤器来过滤掉不需要的pyrogram日志
@@ -41,10 +43,252 @@ for handler in logging.getLogger().handlers:
 # 降低pyrogram日志级别
 logging.getLogger("pyrogram").setLevel(logging.WARNING)
 
-logger = logging.getLogger("TestUpload")
+logger = logging.getLogger("MediaUploader")
+
+def check_file(filepath, file_type="媒体", quiet=False):
+    """检查文件是否存在、可读、大小是否合适"""
+    if not os.path.exists(filepath):
+        if not quiet:
+            logger.error(f"{file_type}文件不存在: {filepath}")
+        return False
+    
+    if not os.path.isfile(filepath):
+        if not quiet:
+            logger.error(f"{filepath} 不是一个文件")
+        return False
+    
+    if not os.access(filepath, os.R_OK):
+        if not quiet:
+            logger.error(f"{file_type}文件无法读取: {filepath}")
+        return False
+    
+    file_size = os.path.getsize(filepath)
+    if file_size == 0:
+        if not quiet:
+            logger.error(f"{file_type}文件大小为0: {filepath}")
+        return False
+    
+    if not quiet:
+        logger.info(f"{file_type}文件检查通过: {filepath} (大小: {file_size/1024:.2f} KB)")
+    return True
+
+def check_video_format(filepath):
+    """
+    检验视频格式是否满足要求：
+    1. 视频格式为mp4或mov
+    2. 音频编码为aac
+    3. 必须包含音频
+    4. 文件大小不超过2G
+    """
+    try:
+        # 检查文件大小
+        file_size_bytes = os.path.getsize(filepath)
+        file_size_gb = file_size_bytes / (1024 * 1024 * 1024)
+        if file_size_gb > 2:
+            logger.warning(f"视频文件过大: {file_size_gb:.2f}GB，超过2GB限制")
+            return False, f"文件过大: {file_size_gb:.2f}GB > 2GB"
+        
+        # 使用ffprobe分析视频
+        cmd = [
+            'ffprobe', 
+            '-v', 'quiet', 
+            '-print_format', 'json', 
+            '-show_format', 
+            '-show_streams', 
+            filepath
+        ]
+        
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        
+        if result.returncode != 0:
+            logger.error(f"分析视频失败: {filepath}")
+            return False, "分析视频失败"
+        
+        video_info = json.loads(result.stdout)
+        
+        # 检查容器格式
+        format_name = video_info.get('format', {}).get('format_name', '').lower()
+        if 'mp4' not in format_name and 'mov' not in format_name:
+            logger.warning(f"视频格式不符合要求: {format_name}")
+            return False, f"视频格式不是mp4或mov: {format_name}"
+        
+        # 检查是否有视频流
+        has_video = False
+        for stream in video_info.get('streams', []):
+            if stream.get('codec_type') == 'video':
+                has_video = True
+                break
+        
+        if not has_video:
+            logger.warning(f"视频中没有视频流: {filepath}")
+            return False, "没有视频流"
+        
+        # 检查是否有音频流，以及音频编码是否为AAC
+        has_audio = False
+        is_aac = False
+        
+        for stream in video_info.get('streams', []):
+            if stream.get('codec_type') == 'audio':
+                has_audio = True
+                codec_name = stream.get('codec_name', '').lower()
+                if 'aac' in codec_name:
+                    is_aac = True
+                break
+        
+        if not has_audio:
+            logger.warning(f"视频没有音频流: {filepath}")
+            return False, "没有音频流"
+        
+        if not is_aac:
+            logger.warning(f"音频编码不是AAC: {filepath}")
+            return False, "音频编码不是AAC"
+        
+        logger.info(f"视频格式检查通过: {filepath}")
+        return True, None
+    
+    except Exception as e:
+        logger.error(f"检查视频格式时出错: {repr(e)}")
+        return False, f"检查出错: {repr(e)}"
+
+async def classify_media_files(files, temp_folder):
+    """
+    对媒体文件进行分类，区分满足和不满足要求的文件
+    视频文件需要检查格式，其他类型文件不需要
+    """
+    compatible_files = []
+    incompatible_files = []
+    compatibility_issues = {}
+    
+    for filename in files:
+        filepath = os.path.join(temp_folder, filename)
+        
+        if not check_file(filepath):
+            incompatible_files.append(filename)
+            compatibility_issues[filename] = "文件不存在或不可读"
+            continue
+        
+        # 对于图片文件，直接认为兼容
+        if filename.endswith(('.jpg', '.jpeg', '.png')):
+            logger.info(f"图片文件无需额外检查: {filename}")
+            compatible_files.append(filename)
+            continue
+        
+        # 检查视频格式
+        if filename.endswith(('.mp4', '.mov', '.avi')):
+            try:
+                is_compatible, reason = check_video_format(filepath)
+                if is_compatible:
+                    compatible_files.append(filename)
+                    logger.info(f"视频格式符合要求: {filename}")
+                else:
+                    incompatible_files.append(filename)
+                    compatibility_issues[filename] = reason
+                    logger.warning(f"视频格式不符合要求: {filename}, 原因: {reason}")
+            except Exception as e:
+                logger.error(f"检查视频格式失败: {repr(e)}")
+                incompatible_files.append(filename)
+                compatibility_issues[filename] = f"分析失败: {repr(e)}"
+    
+    # 输出分类结果
+    logger.info(f"格式符合要求的文件({len(compatible_files)}): {compatible_files}")
+    if incompatible_files:
+        logger.info(f"格式不符合要求的文件({len(incompatible_files)}): {incompatible_files}")
+        for file, reason in compatibility_issues.items():
+            logger.info(f"不符合要求原因({file}): {reason}")
+    
+    return compatible_files, incompatible_files
+
+async def send_files_to_all_channels(app, channels, files, temp_folder, is_group=True):
+    """
+    发送一组文件到所有目标频道
+    is_group=True表示使用媒体组发送，False表示单独发送
+    """
+    all_results = {}
+    
+    for channel in channels:
+        channel_results = []
+        
+        if is_group:
+            # 使用媒体组发送
+            media_group = []
+            valid_files = []
+            
+            for i, filename in enumerate(files):
+                filepath = os.path.join(temp_folder, filename)
+                if not check_file(filepath, quiet=True):
+                    continue
+                
+                valid_files.append(filename)
+                caption = f"媒体组: {filename}" if i == 0 else None
+                
+                if filename.endswith(('.jpg', '.jpeg', '.png')):
+                    media_group.append(InputMediaPhoto(
+                        media=filepath,
+                        caption=caption
+                    ))
+                elif filename.endswith(('.mp4', '.mov', '.avi')):
+                    media_group.append(InputMediaVideo(
+                        media=filepath,
+                        caption=caption,
+                        supports_streaming=True
+                    ))
+            
+            if len(media_group) >= 2:
+                try:
+                    logger.info(f"向频道{channel}发送媒体组({len(media_group)}个项目)")
+                    result = await app.send_media_group(
+                        chat_id=channel,
+                        media=media_group
+                    )
+                    logger.info(f"向频道{channel}成功发送媒体组，共{len(result)}个项目")
+                    channel_results.extend(valid_files)
+                except Exception as e:
+                    logger.error(f"向频道{channel}发送媒体组失败: {repr(e)}")
+        else:
+            # 单独发送每个文件
+            for filename in files:
+                filepath = os.path.join(temp_folder, filename)
+                if not check_file(filepath, quiet=True):
+                    continue
+                
+                try:
+                    if filename.endswith(('.jpg', '.jpeg', '.png')):
+                        logger.info(f"向频道{channel}单独发送照片: {filename}")
+                        await app.send_photo(
+                            chat_id=channel,
+                            photo=filepath,
+                            caption=f"单独发送: {filename}"
+                        )
+                        logger.info(f"向频道{channel}单独发送照片成功: {filename}")
+                        channel_results.append(filename)
+                    
+                    elif filename.endswith(('.mp4', '.mov', '.avi')):
+                        logger.info(f"向频道{channel}单独发送视频: {filename}")
+                        await app.send_video(
+                            chat_id=channel,
+                            video=filepath,
+                            caption=f"单独发送: {filename}",
+                            supports_streaming=True
+                        )
+                        logger.info(f"向频道{channel}单独发送视频成功: {filename}")
+                        channel_results.append(filename)
+                
+                except Exception as e:
+                    logger.error(f"向频道{channel}单独发送文件{filename}失败: {repr(e)}")
+        
+        all_results[channel] = channel_results
+    
+    # 返回每个频道成功发送的文件列表
+    return all_results
 
 async def upload_media_group():
-    """测试上传媒体组到Telegram频道"""
+    """
+    上传媒体组到Telegram频道的主函数
+    新的流程：
+    1. 分类媒体文件，区分符合和不符合媒体组要求的文件
+    2. 将符合要求的文件分批（每批不超过10个）发送到所有目标频道
+    3. 将不符合要求的文件单独发送到所有目标频道
+    """
     
     # 读取配置文件
     config = configparser.ConfigParser()
@@ -72,239 +316,102 @@ async def upload_media_group():
         }
         logger.info(f"使用代理：{proxy_type} {addr}:{port}")
     
-    # 获取目标频道
+    # 获取所有目标频道
     target_channels = [ch.strip() for ch in config.get('CHANNELS', 'target_channels').split(',')]
-    target_channel = target_channels[0]  # 使用第一个目标频道进行测试
-    if target_channel.startswith('https://t.me/'):
-        # 从URL中提取频道用户名
-        target_channel = target_channel.split('/')[-1]
     
-    logger.info(f"目标测试频道: {target_channel}")
+    # 处理频道格式，从URL中提取频道用户名
+    processed_channels = []
+    for channel in target_channels:
+        if channel.startswith('https://t.me/'):
+            channel = channel.split('/')[-1]
+        processed_channels.append(channel)
+    
+    logger.info(f"目标频道列表: {processed_channels}")
     
     # 设置媒体文件夹
     temp_folder = config.get('DOWNLOAD', 'temp_folder')
     if temp_folder.startswith('./'):
         temp_folder = temp_folder[2:]  # 移除开头的'./'
     
-    # 创建pyrogram客户端
-    async with Client("test_session", api_id, api_hash, proxy=proxy) as app:
+    # 确保临时文件夹路径正确
+    if not os.path.exists(temp_folder):
+        logger.error(f"临时文件夹不存在: {temp_folder}")
+        logger.info(f"当前工作目录: {os.getcwd()}")
         try:
-            # 列出temp文件夹中的所有文件
+            os.makedirs(temp_folder, exist_ok=True)
+            logger.info(f"成功创建临时文件夹: {temp_folder}")
+        except Exception as e:
+            logger.error(f"创建临时文件夹失败: {repr(e)}")
+            return
+    
+    # 创建pyrogram客户端
+    async with Client("upload_session", api_id, api_hash, proxy=proxy) as app:
+        try:
+            # 列出并过滤支持的媒体文件
             media_files = [f for f in os.listdir(temp_folder) if os.path.isfile(os.path.join(temp_folder, f))]
-            logger.info(f"找到 {len(media_files)} 个媒体文件")
             
-            # 准备媒体列表
-            media_list = []
-            for filename in media_files:
-                filepath = os.path.join(temp_folder, filename)
-                
-                # 根据文件类型创建不同的InputMedia对象
-                if filename.endswith(('.jpg', '.jpeg', '.png')):
-                    with open(filepath, 'rb') as f:
-                        media_list.append(InputMediaPhoto(
-                            media=f.read(),
-                            caption=f"测试照片: {filename}" if filename == media_files[0] else None
-                        ))
-                        logger.info(f"添加照片: {filename}")
-                
-                elif filename.endswith(('.mp4', '.mov', '.avi')):
-                    media_list.append(InputMediaVideo(
-                        media=filepath,
-                        caption=f"测试视频: {filename}" if filename == media_files[0] else None
-                    ))
-                    logger.info(f"添加视频: {filename}")
-                
-                # 限制为最多10个媒体项目
-                if len(media_list) >= 10:
-                    break
-            
-            # 如果媒体列表为空，发送错误
-            if not media_list:
-                logger.error("没有找到支持的媒体文件")
+            if not media_files:
+                logger.error(f"临时文件夹中没有文件: {temp_folder}")
                 return
             
-            # 为了避免send_media_group的限制，我们最多一次发送10个媒体项目
-            if len(media_list) > 10:
-                media_list = media_list[:10]
-                logger.warning("媒体文件超过10个，仅使用前10个")
+            # 过滤出支持的媒体文件类型
+            supported_files = []
+            for filename in media_files:
+                if filename.endswith(('.jpg', '.jpeg', '.png', '.mp4', '.mov', '.avi')):
+                    supported_files.append(filename)
             
-            # 测试方法1：使用文件路径
-            logger.info("============== 测试方法1：使用文件路径 ==============")
-            media_list_paths = []
-            for i, filename in enumerate(media_files[:4]):  # 只使用前4个文件
-                filepath = os.path.join(temp_folder, filename)
-                if filename.endswith(('.jpg', '.jpeg', '.png')):
-                    media_list_paths.append(InputMediaPhoto(
-                        media=filepath,
-                        caption=f"测试方法1: {filename}" if i == 0 else None
-                    ))
-                elif filename.endswith(('.mp4', '.mov', '.avi')):
-                    media_list_paths.append(InputMediaVideo(
-                        media=filepath,
-                        caption=f"测试方法1: {filename}" if i == 0 else None
-                    ))
+            if not supported_files:
+                logger.error(f"未找到支持的媒体文件类型，只支持jpg、jpeg、png、mp4、mov、avi")
+                return
             
-            if media_list_paths:
-                try:
-                    logger.info("开始发送媒体组（使用文件路径）...")
-                    result = await app.send_media_group(
-                        chat_id=target_channel,
-                        media=media_list_paths
-                    )
-                    logger.info(f"成功！发送了 {len(result)} 个媒体项目")
-                except Exception as e:
-                    # 使用repr()确保完整错误信息被记录，避免截断
-                    logger.error(f"发送失败: {repr(e)}")
+            logger.info(f"找到 {len(supported_files)} 个支持的媒体文件")
             
-            # 测试方法2：使用文件对象
-            logger.info("============== 测试方法2：使用文件对象 ==============")
-            media_file_objects = []
-            file_objects = []  # 保存文件对象的引用，以便后续关闭
+            # 第1步：分类媒体文件
+            logger.info("=== 第1步：分类媒体文件 ===")
+            compatible_files, incompatible_files = await classify_media_files(supported_files, temp_folder)
             
-            try:
-                for i, filename in enumerate(media_files[5:10]):  # 使用后5个文件
-                    filepath = os.path.join(temp_folder, filename)
-                    file_obj = open(filepath, "rb")
-                    file_objects.append(file_obj)
-                    
-                    if filename.endswith(('.jpg', '.jpeg', '.png')):
-                        media_file_objects.append(InputMediaPhoto(
-                            media=file_obj,
-                            caption=f"测试方法2: {filename}" if i == 0 else None
-                        ))
-                    elif filename.endswith(('.mp4', '.mov', '.avi')):
-                        media_file_objects.append(InputMediaVideo(
-                            media=file_obj,
-                            caption=f"测试方法2: {filename}" if i == 0 else None
-                        ))
-                
-                if media_file_objects:
-                    try:
-                        logger.info("开始发送媒体组（使用文件对象）...")
-                        result = await app.send_media_group(
-                            chat_id=target_channel,
-                            media=media_file_objects
-                        )
-                        logger.info(f"成功！发送了 {len(result)} 个媒体项目")
-                    except Exception as e:
-                        # 使用repr()确保完整错误信息被记录，避免截断
-                        logger.error(f"发送失败: {repr(e)}")
-            finally:
-                # 关闭所有文件对象
-                for file_obj in file_objects:
-                    try:
-                        file_obj.close()
-                    except:
-                        pass
-            
-            # 测试方法3：单独处理视频文件，提供更多参数选项
-            logger.info("============== 测试方法3：处理视频文件 ==============")
-            video_files = [f for f in media_files if f.endswith(('.mp4', '.mov', '.avi'))]
-            
-            if video_files:
-                # 首先单独发送一个视频来获取file_id
-                try:
-                    video_path = os.path.join(temp_folder, video_files[0])
-                    logger.info(f"发送单个视频文件: {video_files[0]}")
-                    
-                    # 先发送一个视频以获取file_id
-                    sent_video = await app.send_video(
-                        chat_id=target_channel,
-                        video=video_path,
-                        caption="测试视频以获取file_id",
-                        width=1280,
-                        height=720,
-                        supports_streaming=True,
-                        disable_notification=False
-                    )
-                    
-                    if sent_video and hasattr(sent_video, 'video') and hasattr(sent_video.video, 'file_id'):
-                        video_file_id = sent_video.video.file_id
-                        logger.info(f"获取到视频file_id: {video_file_id}")
-                        
-                        # 使用file_id构建媒体组
-                        photo_files = [f for f in media_files if f.endswith(('.jpg', '.jpeg', '.png'))][:4]  # 最多4张照片
-                        
-                        if photo_files:
-                            file_id_media_group = []
-                            # 添加视频
-                            file_id_media_group.append(InputMediaVideo(
-                                media=video_file_id,
-                                caption="使用file_id的视频"
-                            ))
-                            
-                            # 添加照片
-                            for photo_file in photo_files:
-                                photo_path = os.path.join(temp_folder, photo_file)
-                                file_id_media_group.append(InputMediaPhoto(
-                                    media=photo_path
-                                ))
-                            
-                            # 发送媒体组
-                            logger.info("使用file_id发送媒体组...")
-                            try:
-                                result = await app.send_media_group(
-                                    chat_id=target_channel,
-                                    media=file_id_media_group
-                                )
-                                logger.info(f"成功！使用file_id发送了 {len(result)} 个媒体项目")
-                            except Exception as e:
-                                # 使用repr()确保完整错误信息被记录，避免截断
-                                logger.error(f"使用file_id发送失败: {repr(e)}")
+            # 第2步：将符合要求的文件分批发送（媒体组）
+            if compatible_files:
+                logger.info("=== 第2步：以媒体组方式发送符合要求的文件 ===")
+                # 将文件分批，每批最多10个
+                batches = []
+                for i in range(0, len(compatible_files), 10):
+                    batch = compatible_files[i:i+10]
+                    if len(batch) >= 2:  # 媒体组至少需要2个文件
+                        batches.append(batch)
                     else:
-                        logger.error("无法获取视频file_id")
+                        # 不足2个的放入不兼容列表单独发送
+                        incompatible_files.extend(batch)
                 
-                except Exception as e:
-                    # 使用repr()确保完整错误信息被记录，避免截断
-                    logger.error(f"处理视频文件时出错: {repr(e)}")
-            else:
-                logger.warning("没有找到视频文件，跳过测试方法3")
-            
-            # 测试方法4：使用更安全的参数配置，避免is_premium错误
-            logger.info("============== 测试方法4：使用安全参数配置 ==============")
-            
-            # 只使用照片文件，通常更容易成功
-            photo_files = [f for f in media_files if f.endswith(('.jpg', '.jpeg', '.png'))][:5]  # 最多5张照片
-            
-            if photo_files:
-                try:
-                    # 创建修改后的媒体列表，添加所有可能避免is_premium错误的参数
-                    safe_media_list = []
-                    
-                    for i, photo_file in enumerate(photo_files):
-                        photo_path = os.path.join(temp_folder, photo_file)
-                        
-                        # 直接使用文件路径，添加所有可能有帮助的参数
-                        safe_media_list.append(InputMediaPhoto(
-                            media=photo_path,
-                            caption=f"安全测试: {photo_file}" if i == 0 else None,
-                            parse_mode=None,  # 明确设置为None，避免解析模式问题
-                            has_spoiler=False
-                        ))
-                    
-                    logger.info("使用安全参数配置发送媒体组...")
-                    
-                    # 使用明确的参数配置发送
-                    result = await app.send_media_group(
-                        chat_id=target_channel,
-                        media=safe_media_list,
-                        disable_notification=False,  # 明确设置通知参数
-                        message_thread_id=None,      # 明确设置为None
-                        protect_content=False        # 明确设置内容保护
+                # 逐批发送
+                for i, batch in enumerate(batches):
+                    logger.info(f"=== 发送第{i+1}/{len(batches)}批媒体组 ===")
+                    results = await send_files_to_all_channels(
+                        app, processed_channels, batch, temp_folder, is_group=True
                     )
                     
-                    logger.info(f"成功！使用安全参数发送了 {len(result)} 个媒体项目")
+                    # 输出每个频道的发送结果
+                    for channel, sent_files in results.items():
+                        logger.info(f"第{i+1}批媒体组，频道{channel}成功发送: {sent_files}")
                     
-                except Exception as e:
-                    # 使用repr()确保完整错误信息被记录，避免截断
-                    logger.error(f"使用安全参数发送失败: {repr(e)}")
-            else:
-                logger.warning("没有找到照片文件，跳过测试方法4")
+                    # 等待一下再发送下一批
+                    if i < len(batches) - 1:
+                        await asyncio.sleep(3)
             
-            logger.info("测试完成")
+            # 第3步：单独发送不符合要求的文件
+            if incompatible_files:
+                logger.info("=== 第3步：单独发送不符合要求的文件 ===")
+                results = await send_files_to_all_channels(
+                    app, processed_channels, incompatible_files, temp_folder, is_group=False
+                )
+                
+                # 输出每个频道的发送结果
+                for channel, sent_files in results.items():
+                    logger.info(f"单独发送，频道{channel}成功发送: {sent_files}")
+            
+            logger.info("所有媒体文件上传完成")
             
         except Exception as e:
-            # 使用repr()确保完整错误信息被记录，避免截断
             logger.error(f"发生错误: {repr(e)}")
 
 if __name__ == "__main__":
