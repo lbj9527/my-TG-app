@@ -113,6 +113,12 @@ class ColoredFormatter(logging.Formatter):
                     record.msg = f"{Fore.CYAN}🔍 {message}{Style.RESET_ALL}"
                 elif "准备上传" in message:
                     record.msg = f"{Fore.YELLOW}📋 {message}{Style.RESET_ALL}"
+                elif "转发" in message and "开始" in message:
+                    record.msg = f"{Fore.BLUE}🔄 {message}{Style.RESET_ALL}"
+                elif "转发" in message and "成功" in message:
+                    record.msg = f"{Fore.GREEN}✅ {message}{Style.RESET_ALL}"
+                elif "频道测试" in message:
+                    record.msg = f"{Fore.MAGENTA}🧪 {message}{Style.RESET_ALL}"
                 else:
                     record.msg = f"{Fore.WHITE}ℹ️ {message}{Style.RESET_ALL}"
             elif levelname == "WARNING":
@@ -155,7 +161,7 @@ asyncio_logger.addFilter(ErrorFilter())
 pyrogram_logger = logging.getLogger("pyrogram")
 pyrogram_logger.addFilter(ErrorFilter())
 
-# 抑制未捕获的异常输出
+# 改进异常处理函数
 def custom_excepthook(exc_type, exc_value, exc_traceback):
     if issubclass(exc_type, KeyboardInterrupt):
         # 正常处理键盘中断
@@ -175,17 +181,24 @@ def custom_excepthook(exc_type, exc_value, exc_traceback):
             print(f"{Fore.YELLOW}⚠️ 频道ID解析错误: {Fore.CYAN}{peer_info}{Fore.YELLOW}，这不会影响上传功能。{Style.RESET_ALL}")
         else:
             print(f"⚠️ 频道ID解析错误: {peer_info}，这不会影响上传功能。")
+    elif "CHAT_FORWARDS_RESTRICTED" in error_msg:
+        if COLORAMA_AVAILABLE:
+            print(f"{Fore.YELLOW}⚠️ 频道限制转发: {Fore.CYAN}{error_msg}{Style.RESET_ALL}")
+            print(f"{Fore.GREEN}💡 程序将尝试使用copy_message/copy_media_group替代转发{Style.RESET_ALL}")
+        else:
+            print(f"⚠️ 频道限制转发: {error_msg}")
+            print("💡 程序将尝试使用copy_message/copy_media_group替代转发")
     else:
         # 对其他错误进行简化处理
         error_type = exc_type.__name__
         if COLORAMA_AVAILABLE:
             print(f"{Fore.RED}❌ 错误类型: {Fore.WHITE}{error_type}{Style.RESET_ALL}")
             print(f"{Fore.RED}❌ 错误信息: {Fore.WHITE}{error_msg}{Style.RESET_ALL}")
-            print(f"{Fore.YELLOW}如需查看详细错误跟踪，请在命令行运行本程序时添加 --debug 参数{Style.RESET_ALL}")
+            print(f"{Fore.YELLOW}💡 使用 --debug 参数运行可查看详细错误跟踪{Style.RESET_ALL}")
         else:
             print(f"❌ 错误类型: {error_type}")
             print(f"❌ 错误信息: {error_msg}")
-            print("如需查看详细错误跟踪，请在命令行运行本程序时添加 --debug 参数")
+            print("💡 使用 --debug 参数运行可查看详细错误跟踪")
             
         # 只有在debug模式下才显示完整堆栈信息
         if "--debug" in sys.argv:
@@ -406,22 +419,84 @@ def parse_channel_identifier(channel: str) -> str:
 class CustomMediaGroupSender:
     """自定义媒体组发送器，支持带进度显示的媒体组发送"""
     
-    def __init__(self, client: Client, temp_folder: str = 'temp', target_channels: List[str] = None):
+    def _load_config(self, config_path: str) -> dict:
+        """
+        从配置文件加载配置
+        
+        参数:
+            config_path: 配置文件路径
+            
+        返回:
+            dict: 配置字典
+        """
+        config_dict = {
+            "temp_folder": "temp",
+            "target_channels": [],
+            "max_concurrent_batches": 3,
+            "hide_author": False
+        }
+        
+        if not os.path.exists(config_path):
+            logger.warning(f"配置文件不存在: {config_path}，将使用默认配置")
+            return config_dict
+            
+        try:
+            config = configparser.ConfigParser()
+            config.read(config_path, encoding='utf-8')
+            
+            # 读取频道配置
+            if config.has_section("CHANNELS"):
+                target_channels_str = config.get("CHANNELS", "target_channels", fallback="")
+                config_dict["target_channels"] = [
+                    ch.strip() 
+                    for ch in target_channels_str.split(",") 
+                    if ch.strip()
+                ]
+                
+                # 读取是否隐藏作者配置
+                config_dict["hide_author"] = config.getboolean("CHANNELS", "hide_author", fallback=False)
+            
+            # 读取临时文件夹配置
+            if config.has_section("DOWNLOAD"):
+                config_dict["temp_folder"] = config.get("DOWNLOAD", "temp_folder", fallback="temp")
+                
+            # 读取并发上传数配置
+            if config.has_section("PERFORMANCE"):
+                config_dict["max_concurrent_batches"] = config.getint("PERFORMANCE", "max_concurrent_batches", fallback=3)
+            
+            return config_dict
+            
+        except Exception as e:
+            logger.error(f"加载配置文件出错: {str(e)}，将使用默认配置")
+            return config_dict
+    
+    def __init__(self, client: Client, config_path: str = "config.ini"):
         """初始化媒体发送器"""
         self.client = client
-        self.temp_folder = temp_folder
-        self.target_channels = []
+        self.config = self._load_config(config_path)
+        self.temp_folder = self.config.get("temp_folder", "temp")
+        self.target_channels = self.config.get("target_channels", [])
+        self.max_concurrent_uploads = self.config.get("max_concurrent_batches", 3)
+        self.hide_author = self.config.get("hide_author", False)
+        self.semaphore = asyncio.Semaphore(self.max_concurrent_uploads)
+        
+        # 初始化日志
+        logger.info(f"媒体发送器初始化完成: 目标频道数 {len(self.target_channels)}")
+        logger.info(f"隐藏消息来源: {self.hide_author}")
+        logger.info(f"临时文件夹: {self.temp_folder}")
+        logger.info(f"最大并发上传数: {self.max_concurrent_uploads}")
         
         # 确保临时文件夹存在
-        if not os.path.exists(temp_folder):
-            os.makedirs(temp_folder)
-            
+        os.makedirs(self.temp_folder, exist_ok=True)
+        
         # 设置目标频道
-        if target_channels:
-            for channel in target_channels:
+        parsed_channels = []
+        if self.target_channels:
+            for channel in self.target_channels:
                 parsed = parse_channel_identifier(channel)
                 if parsed:
-                    self.target_channels.append(parsed)
+                    parsed_channels.append(parsed)
+        self.target_channels = parsed_channels
     
     def get_media_files(self, folder: str, limit: int = 10) -> List[str]:
         """获取指定文件夹下的媒体文件"""
@@ -659,7 +734,7 @@ class CustomMediaGroupSender:
             logger.error(f"发送媒体组失败: {str(e)}")
             return False, sent_messages
     
-    async def forward_media_messages(self, from_chat_id: str, to_chat_id: str, messages: List[Message]) -> bool:
+    async def forward_media_messages(self, from_chat_id: str, to_chat_id: str, messages: List[Message], hide_author: bool = False) -> Tuple[bool, List[Message]]:
         """
         将媒体消息从一个频道转发到另一个频道
         
@@ -667,13 +742,14 @@ class CustomMediaGroupSender:
             from_chat_id: 源频道ID
             to_chat_id: 目标频道ID
             messages: 要转发的消息列表
+            hide_author: 是否隐藏消息来源，True使用copy_media_group/copy_message，False使用forward_messages
             
         返回:
-            bool: 转发是否成功
+            Tuple[bool, List[Message]]: 转发是否成功, 转发后的消息列表
         """
         if not messages:
             logger.warning("没有提供要转发的消息")
-            return False
+            return False, []
             
         try:
             # 分批转发（每批最多10个消息）
@@ -681,9 +757,9 @@ class CustomMediaGroupSender:
             batches = [messages[i:i+batch_size] for i in range(0, len(messages), batch_size)]
             
             if COLORAMA_AVAILABLE:
-                logger.info(f"{Fore.CYAN}开始从 {from_chat_id} 转发 {len(messages)} 条消息到 {to_chat_id}{Style.RESET_ALL}")
+                logger.info(f"{Fore.CYAN}开始从 {from_chat_id} 转发 {len(messages)} 条消息到 {to_chat_id} (隐藏作者: {hide_author}){Style.RESET_ALL}")
             else:
-                logger.info(f"开始从 {from_chat_id} 转发 {len(messages)} 条消息到 {to_chat_id}")
+                logger.info(f"开始从 {from_chat_id} 转发 {len(messages)} 条消息到 {to_chat_id} (隐藏作者: {hide_author})")
                 
             # 创建转发进度条
             forward_desc = "转发消息" if not COLORAMA_AVAILABLE else f"{Fore.BLUE}转发消息{Style.RESET_ALL}"
@@ -691,21 +767,77 @@ class CustomMediaGroupSender:
                      bar_format=BATCH_BAR_FORMAT,
                      colour='blue' if not COLORAMA_AVAILABLE else None) if TQDM_AVAILABLE else None as forward_pbar:
                 
+                # 存储所有转发后的消息
+                forwarded_messages = []
+                
                 for i, batch in enumerate(batches):
                     try:
-                        message_ids = [msg.id for msg in batch]
+                        batch_forwarded = []
                         
-                        # 使用Pyrogram的forward_messages方法
-                        await self.client.forward_messages(
-                            chat_id=to_chat_id,
-                            from_chat_id=from_chat_id,
-                            message_ids=message_ids
-                        )
+                        # 检查是否需要隐藏作者
+                        if hide_author:
+                            # 检查批次中的消息是否都属于同一个媒体组
+                            media_group_id = batch[0].media_group_id if batch and hasattr(batch[0], 'media_group_id') else None
+                            
+                            # 如果是媒体组且所有消息都属于同一媒体组，使用copy_media_group
+                            if (media_group_id and 
+                                all(hasattr(msg, 'media_group_id') and msg.media_group_id == media_group_id for msg in batch)):
+                                try:
+                                    # 使用copy_media_group批量复制媒体组
+                                    batch_forwarded = await self.client.copy_media_group(
+                                        chat_id=to_chat_id,
+                                        from_chat_id=from_chat_id,
+                                        message_id=batch[0].id
+                                    )
+                                    
+                                    if COLORAMA_AVAILABLE:
+                                        logger.info(f"{Fore.GREEN}使用copy_media_group成功转发媒体组批次 {i+1}/{len(batches)}{Style.RESET_ALL}")
+                                    else:
+                                        logger.info(f"使用copy_media_group成功转发媒体组批次 {i+1}/{len(batches)}")
+                                except Exception as e:
+                                    logger.warning(f"使用copy_media_group转发失败: {str(e)}，将尝试逐条复制消息")
+                                    batch_forwarded = []
+                                    # 如果媒体组转发失败，回退到逐条复制
+                                    for msg in batch:
+                                        try:
+                                            forwarded = await self.client.copy_message(
+                                                chat_id=to_chat_id,
+                                                from_chat_id=from_chat_id,
+                                                message_id=msg.id
+                                            )
+                                            batch_forwarded.append(forwarded)
+                                        except Exception as inner_e:
+                                            logger.error(f"复制消息 {msg.id} 失败: {str(inner_e)}")
+                            else:
+                                # 不是媒体组或不同媒体组，逐条复制消息
+                                for msg in batch:
+                                    try:
+                                        forwarded = await self.client.copy_message(
+                                            chat_id=to_chat_id,
+                                            from_chat_id=from_chat_id,
+                                            message_id=msg.id
+                                        )
+                                        batch_forwarded.append(forwarded)
+                                    except Exception as e:
+                                        logger.error(f"复制消息 {msg.id} 失败: {str(e)}")
+                        else:
+                            # 不隐藏作者，使用转发保留原始格式
+                            message_ids = [msg.id for msg in batch]
+                            
+                            # 使用Pyrogram的forward_messages方法
+                            batch_forwarded = await self.client.forward_messages(
+                                chat_id=to_chat_id,
+                                from_chat_id=from_chat_id,
+                                message_ids=message_ids
+                            )
+                            
+                        # 将转发成功的消息添加到结果列表
+                        forwarded_messages.extend(batch_forwarded)
                         
                         if COLORAMA_AVAILABLE:
-                            logger.info(f"{Fore.GREEN}成功转发批次 {i+1}/{len(batches)} ({len(batch)} 条消息){Style.RESET_ALL}")
+                            logger.info(f"{Fore.GREEN}成功转发批次 {i+1}/{len(batches)} ({len(batch_forwarded)} 条消息){Style.RESET_ALL}")
                         else:
-                            logger.info(f"成功转发批次 {i+1}/{len(batches)} ({len(batch)} 条消息)")
+                            logger.info(f"成功转发批次 {i+1}/{len(batches)} ({len(batch_forwarded)} 条消息)")
                             
                     except FloodWait as e:
                         logger.warning(f"转发时遇到频率限制，等待 {e.value} 秒后重试")
@@ -723,23 +855,42 @@ class CustomMediaGroupSender:
                             await asyncio.sleep(e.value)
                             
                         # 重试转发
-                        await self.client.forward_messages(
-                            chat_id=to_chat_id,
-                            from_chat_id=from_chat_id,
-                            message_ids=message_ids
-                        )
+                        if hide_author:
+                            # 隐藏作者情况下的重试逻辑同上
+                            batch_forwarded = []
+                            for msg in batch:
+                                try:
+                                    forwarded = await self.client.copy_message(
+                                        chat_id=to_chat_id,
+                                        from_chat_id=from_chat_id,
+                                        message_id=msg.id
+                                    )
+                                    batch_forwarded.append(forwarded)
+                                except Exception as inner_e:
+                                    logger.error(f"重试复制消息 {msg.id} 失败: {str(inner_e)}")
+                        else:
+                            # 不隐藏作者，使用forward_messages重试
+                            message_ids = [msg.id for msg in batch]
+                            batch_forwarded = await self.client.forward_messages(
+                                chat_id=to_chat_id,
+                                from_chat_id=from_chat_id,
+                                message_ids=message_ids
+                            )
+                            
+                        # 将重试成功的消息添加到结果列表
+                        forwarded_messages.extend(batch_forwarded)
                         
                         if COLORAMA_AVAILABLE:
-                            logger.info(f"{Fore.GREEN}重试后成功转发批次 {i+1}/{len(batches)} ({len(batch)} 条消息){Style.RESET_ALL}")
+                            logger.info(f"{Fore.GREEN}重试后成功转发批次 {i+1}/{len(batches)} ({len(batch_forwarded)} 条消息){Style.RESET_ALL}")
                         else:
-                            logger.info(f"重试后成功转发批次 {i+1}/{len(batches)} ({len(batch)} 条消息)")
+                            logger.info(f"重试后成功转发批次 {i+1}/{len(batches)} ({len(batch_forwarded)} 条消息)")
                     
                     except Exception as e:
                         error_msg = str(e)
                         if len(error_msg) > 100:
                             error_msg = error_msg[:100] + "..."
                         logger.error(f"转发批次 {i+1}/{len(batches)} 失败: {error_msg}")
-                        return False
+                        return False, forwarded_messages
                         
                     # 批次之间添加短暂延迟，避免触发频率限制
                     if i < len(batches) - 1:
@@ -750,15 +901,15 @@ class CustomMediaGroupSender:
                         forward_pbar.update(1)
                         
             if COLORAMA_AVAILABLE:
-                logger.info(f"{Fore.GREEN}{Style.BRIGHT}所有消息转发完成! {from_chat_id} -> {to_chat_id}{Style.RESET_ALL}")
+                logger.info(f"{Fore.GREEN}{Style.BRIGHT}所有消息转发完成! {from_chat_id} -> {to_chat_id} (共 {len(forwarded_messages)} 条){Style.RESET_ALL}")
             else:
-                logger.info(f"所有消息转发完成! {from_chat_id} -> {to_chat_id}")
+                logger.info(f"所有消息转发完成! {from_chat_id} -> {to_chat_id} (共 {len(forwarded_messages)} 条)")
                 
-            return True
+            return True, forwarded_messages
             
         except Exception as e:
             logger.error(f"转发消息时出错: {str(e)}")
-            return False
+            return False, []
     
     async def send_to_all_channels(self, file_paths_groups: List[List[str]]) -> Dict[str, bool]:
         """
@@ -793,7 +944,8 @@ class CustomMediaGroupSender:
                     logger.warning(f"文件组 {group_index+1} 中没有文件，跳过")
                     continue
                 
-                # 获取第一个目标频道
+                # 首先尝试从收藏夹发送到第一个频道
+                # 这里直接发送到第一个频道，后续会检测是否可以转发
                 first_channel = self.target_channels[0]
                 
                 # 彩色日志
@@ -806,23 +958,116 @@ class CustomMediaGroupSender:
                 success, sent_messages = await self.send_media_group_with_progress(first_channel, file_paths)
                 results[first_channel] = results[first_channel] and success
                 
-                # 如果第一个频道发送成功并且有其他频道，则通过转发发送到其他频道
+                # 如果第一个频道发送成功并且有其他频道，则尝试转发到其他频道
                 if success and sent_messages and len(self.target_channels) > 1:
-                    if COLORAMA_AVAILABLE:
-                        logger.info(f"{Fore.GREEN}第一个频道发送成功，开始向其他 {len(self.target_channels)-1} 个频道转发{Style.RESET_ALL}")
-                    else:
-                        logger.info(f"第一个频道发送成功，开始向其他 {len(self.target_channels)-1} 个频道转发")
-                    
-                    # 转发到其他频道
-                    for i, channel in enumerate(self.target_channels[1:], 1):
-                        if COLORAMA_AVAILABLE:
-                            logger.info(f"{Fore.BLUE}开始向频道 {channel} 转发 ({i}/{len(self.target_channels)-1}){Style.RESET_ALL}")
+                    # 首先验证第一个频道是否可以转发
+                    can_forward = True
+                    try:
+                        # 尝试向自己转发一条消息，测试是否可以转发
+                        logger.info(f"频道测试: 检查 {first_channel} 是否允许转发")
+                        test_forward = await self.client.forward_messages(
+                            chat_id="me",
+                            from_chat_id=first_channel,
+                            message_ids=[sent_messages[0].id]
+                        )
+                        # 测试完成后删除测试消息
+                        if test_forward:
+                            await test_forward[0].delete()
+                            logger.info(f"频道测试: {first_channel} 允许转发 ✓")
+                    except Exception as e:
+                        if "CHAT_FORWARDS_RESTRICTED" in str(e):
+                            can_forward = False
+                            logger.warning(f"频道测试: {first_channel} 禁止转发 ✗ - 将寻找其他可转发频道")
                         else:
-                            logger.info(f"开始向频道 {channel} 转发 ({i}/{len(self.target_channels)-1})")
-                            
-                        forward_success = await self.forward_media_messages(first_channel, channel, sent_messages)
-                        results[channel] = results[channel] and forward_success
+                            logger.info(f"频道测试: {first_channel} 转发测试失败，原因: {type(e).__name__}: {str(e)}")
+                    
+                    # 如果第一个频道可以转发，直接从它转发到其他频道
+                    source_channel = first_channel
+                    source_messages = sent_messages
+                    
+                    # 如果第一个频道不可转发，尝试找到一个可转发的频道
+                    if not can_forward and len(self.target_channels) > 1:
+                        # 查找可转发的频道
+                        found_unrestricted = False
+                        logger.info("开始查找可转发频道...")
                         
+                        for test_channel in self.target_channels[1:]:
+                            logger.info(f"频道测试: 检查 {test_channel} 是否允许转发")
+                            # 先向这个频道发送
+                            test_success, test_messages = await self.send_media_group_with_progress(test_channel, file_paths)
+                            if not test_success or not test_messages:
+                                logger.warning(f"频道测试: {test_channel} 发送媒体失败，跳过检查")
+                                continue
+                                
+                            # 测试是否可以转发
+                            try:
+                                test_forward = await self.client.forward_messages(
+                                    chat_id="me",
+                                    from_chat_id=test_channel,
+                                    message_ids=[test_messages[0].id]
+                                )
+                                # 可以转发，使用这个频道作为源
+                                if test_forward:
+                                    await test_forward[0].delete()
+                                    source_channel = test_channel
+                                    source_messages = test_messages
+                                    found_unrestricted = True
+                                    results[test_channel] = True
+                                    logger.info(f"频道测试: {test_channel} 允许转发 ✓ - 将使用此频道作为转发源")
+                                    break
+                            except Exception as e:
+                                error_type_name = type(e).__name__
+                                if "CHAT_FORWARDS_RESTRICTED" in str(e):
+                                    logger.warning(f"频道测试: {test_channel} 禁止转发 ✗")
+                                else:
+                                    logger.warning(f"频道测试: {test_channel} 转发测试失败: {error_type_name}: {str(e)}")
+                                continue
+                                
+                        if not found_unrestricted:
+                            logger.warning("频道测试: 所有频道均禁止转发，将使用copy_message/copy_media_group替代转发")
+                            
+                    if COLORAMA_AVAILABLE:
+                        logger.info(f"{Fore.GREEN}开始并行转发到其他 {len(self.target_channels)-1} 个频道{Style.RESET_ALL}")
+                    else:
+                        logger.info(f"开始并行转发到其他 {len(self.target_channels)-1} 个频道")
+                    
+                    # 创建转发任务列表，排除源频道
+                    forward_tasks = []
+                    remaining_channels = [ch for ch in self.target_channels if ch != source_channel]
+                    
+                    # 并行转发到其他频道
+                    for i, channel in enumerate(remaining_channels, 1):
+                        if COLORAMA_AVAILABLE:
+                            logger.info(f"{Fore.BLUE}准备向频道 {channel} 转发 ({i}/{len(remaining_channels)}){Style.RESET_ALL}")
+                        else:
+                            logger.info(f"准备向频道 {channel} 转发 ({i}/{len(remaining_channels)})")
+                            
+                        # 创建转发任务
+                        forward_task = self.forward_media_messages(
+                            source_channel, 
+                            channel, 
+                            source_messages,
+                            hide_author=self.hide_author
+                        )
+                        forward_tasks.append((channel, forward_task))
+                    
+                    # 等待所有转发任务完成
+                    for channel, task in forward_tasks:
+                        try:
+                            forward_success, _ = await task
+                            results[channel] = results[channel] and forward_success
+                            
+                            if COLORAMA_AVAILABLE:
+                                status = f"{Fore.GREEN}成功{Style.RESET_ALL}" if forward_success else f"{Fore.RED}失败{Style.RESET_ALL}"
+                                logger.info(f"向频道 {channel} 转发{status}")
+                            else:
+                                status = "成功" if forward_success else "失败"
+                                logger.info(f"向频道 {channel} 转发{status}")
+                                
+                        except Exception as e:
+                            logger.error(f"向频道 {channel} 转发时发生错误: {str(e)}")
+                            results[channel] = False
+                
                 # 如果第一个频道发送失败或者为空，尝试逐个发送到每个频道
                 elif (not success or not sent_messages) and len(self.target_channels) > 1:
                     if COLORAMA_AVAILABLE:
@@ -850,6 +1095,14 @@ async def main():
     """主函数"""
     # 处理命令行参数
     debug_mode = "--debug" in sys.argv
+    
+    # 设置日志级别
+    if debug_mode:
+        logger.setLevel(logging.DEBUG)
+        logging.getLogger("pyrogram").setLevel(logging.WARNING)
+    else:
+        logger.setLevel(logging.INFO)
+        logging.getLogger("pyrogram").setLevel(logging.ERROR)
     
     # 检查tqdm是否可用，如果不可用提醒用户安装
     if not TQDM_AVAILABLE:
@@ -951,8 +1204,8 @@ async def main():
             print(" "*15 + "🎨 使用tqdm提供专业的进度显示")
             print("="*60 + "\n")
         
-        # 初始化自定义媒体发送器
-        sender = CustomMediaGroupSender(client, temp_folder, target_channels)
+        # 初始化自定义媒体发送器（使用新的构造函数）
+        sender = CustomMediaGroupSender(client, config_path='config.ini')
         
         # 获取测试媒体文件
         media_files = sender.get_media_files(sender.temp_folder)
