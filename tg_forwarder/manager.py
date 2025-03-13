@@ -18,11 +18,6 @@ from tg_forwarder.utils.logger import setup_logger, get_logger
 # 获取日志记录器
 logger = get_logger("manager")
 
-# 导入上传类（在日志设置之后导入）
-# 确保uploader.py所在的目录在导入路径中
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from uploader import Uploader
-
 class ForwardManager:
     """转发管理器类，负责协调整个转发流程"""
     
@@ -213,32 +208,6 @@ class ForwardManager:
                            f"失败 {failed_count} 条 ({100 - success_percentage:.1f}%)")
             else:
                 logger.info("所有消息转发成功，无需下载源频道消息")
-            
-            # 检查上传配置 - 由于禁止转发的情况已经处理了上传，这里只处理普通转发后上传的情况
-            upload_config = self.config.get_upload_config()
-            if not result.get("forwards_restricted", False) and upload_config.get("enabled", False) and upload_config.get("upload_after_forward", True):
-                logger.info("开始上传本地媒体文件...")
-                try:
-                    # 添加更多上传前的日志信息
-                    logger.info(f"上传配置: 临时文件夹={upload_config.get('temp_folder', 'temp')}")
-                    logger.info(f"目标频道: {', '.join(target_identifiers)}")
-                    
-                    # 调用Uploader上传媒体文件
-                    upload_success = await Uploader.create_and_upload(self.config_path)
-                    if upload_success:
-                        logger.info("媒体文件上传成功")
-                        # 将上传结果添加到转发结果中
-                        result["upload_success"] = True
-                    else:
-                        logger.error("媒体文件上传失败")
-                        result["upload_success"] = False
-                except Exception as e:
-                    logger.error(f"上传过程中发生错误: {str(e)}")
-                    result["upload_success"] = False
-                    result["upload_error"] = str(e)
-            else:
-                if not result.get("forwards_restricted", False):
-                    logger.info("媒体文件上传功能未启用或不需要在转发后上传")
             
             return result
         
