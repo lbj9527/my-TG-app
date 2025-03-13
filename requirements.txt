@@ -9,4 +9,7 @@ loguru==0.7.0
 urllib3==2.0.4
 typing-extensions==4.7.1
 pillow==10.0.0
-requests==2.31.0 
+requests==2.31.0
+# 自定义媒体组上传所需
+tqdm==4.66.1
+colorama==0.4.6 
