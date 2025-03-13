@@ -12,4 +12,10 @@ pillow==10.0.0
 requests==2.31.0
 # 自定义媒体组上传所需
 tqdm==4.66.1
-colorama==0.4.6 
+colorama==0.4.6
+# 视频缩略图生成所需
+moviepy==2.1.2
+# moviepy依赖以下库(大部分会自动安装，列出主要依赖)
+numpy>=1.25.0
+imageio>=2.5,<3.0
+imageio-ffmpeg>=0.2.0 
