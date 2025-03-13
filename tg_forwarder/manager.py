@@ -123,51 +123,112 @@ class ForwardManager:
                 end_message_id
             )
             
-            # 检查转发结果中是否有转发的消息
-            if result.get("success") and result.get("forwarded_messages"):
-                # 检查下载配置
-                download_config = self.config.get_download_config()
-                if download_config.get("enabled", False):
-                    logger.info("开始下载源频道中的媒体文件...")
-                    try:
-                        # 从源频道直接下载指定范围内的消息
+            # 获取下载配置
+            download_config = self.config.get_download_config()
+            
+            # 检查源频道是否禁止转发
+            if result.get("forwards_restricted", False):
+                logger.warning("检测到源频道禁止转发消息，将使用备用方式: 下载文件后上传")
+                try:
+                    # 下载源频道消息到本地
+                    logger.info(f"开始下载源频道消息...")
+                    
+                    # 从源频道直接下载指定范围内的消息
+                    download_results = await self.downloader.download_messages_from_source(
+                        source_identifier, 
+                        start_message_id, 
+                        end_message_id
+                    )
+                    
+                    # 将下载结果添加到转发结果中
+                    result["download_results"] = download_results
+                    logger.info(f"媒体文件下载完成，保存到: {download_config['temp_folder']}")
+                    
+                    # 如果有下载的文件，使用CustomMediaGroupSender进行上传
+                    if download_results:
+                        logger.info("开始使用备用方式上传媒体文件...")
+                        
+                        # 获取下载的文件路径列表
+                        downloaded_files = [path for path in download_results.values() if path]
+                        
+                        if downloaded_files:
+                            # 导入CustomMediaGroupSender
+                            from tg_forwarder.customUploader import CustomMediaGroupSender
+                            
+                            # 调用上传方法
+                            upload_result = await CustomMediaGroupSender.upload_from_source(
+                                config_path=self.config_path,
+                                downloaded_files=downloaded_files,
+                                target_channels=target_channels_str,
+                                delete_after_upload=True  # 上传后删除文件
+                            )
+                            
+                            # 合并上传结果到总结果
+                            result["upload_results"] = upload_result
+                            
+                            if upload_result.get("success", False):
+                                logger.info(f"备用上传成功: {upload_result.get('uploaded_files', 0)} 个文件上传到 {upload_result.get('success_channels', 0)} 个频道")
+                            else:
+                                logger.error(f"备用上传失败: {upload_result.get('error', '未知错误')}")
+                        else:
+                            logger.warning("没有成功下载的媒体文件，无法进行备用上传")
+                    else:
+                        logger.warning("没有下载结果，无法进行备用上传")
+                
+                except Exception as e:
+                    logger.error(f"备用方式处理时出错: {repr(e)}")
+                    result["backup_error"] = str(e)
+            
+            # 如果有转发失败的消息(但源频道不是禁止转发的)，则尝试下载这些消息
+            elif result.get("failed", 0) > 0 and "failed_messages" in result:
+                failed_message_ids = result["failed_messages"]
+                logger.info(f"检测到 {result.get('failed')} 条消息转发失败，开始尝试下载失败的源频道消息到本地...")
+                try:
+                    # 如果是连续的消息ID范围，使用范围下载
+                    if len(failed_message_ids) > 0:
+                        # 从源频道下载失败的消息
+                        min_id = min(failed_message_ids)
+                        max_id = max(failed_message_ids)
+                        logger.info(f"下载失败消息ID范围: {min_id}-{max_id}")
+                        
                         download_results = await self.downloader.download_messages_from_source(
                             source_identifier, 
-                            start_message_id, 
-                            end_message_id
+                            min_id, 
+                            max_id
                         )
                         # 将下载结果添加到转发结果中
                         result["download_results"] = download_results
                         logger.info(f"媒体文件下载完成，保存到: {download_config['temp_folder']}")
-                    except Exception as e:
-                        logger.error(f"下载媒体文件时出错: {repr(e)}")
-                        result["download_error"] = str(e)
-                else:
-                    logger.info("媒体文件下载功能未启用，跳过下载")
-                
-                # 检查上传配置
-                upload_config = self.config.get_upload_config()
-                if upload_config.get("enabled", False) and upload_config.get("upload_after_forward", True):
-                    logger.info("开始上传本地媒体文件...")
-                    try:
-                        # 添加更多上传前的日志信息
-                        logger.info(f"上传配置: 临时文件夹={upload_config.get('temp_folder', 'temp')}")
-                        logger.info(f"目标频道: {', '.join(target_identifiers)}")
-                        
-                        # 调用Uploader上传媒体文件
-                        upload_success = await Uploader.create_and_upload(self.config_path)
-                        if upload_success:
-                            logger.info("媒体文件上传成功")
-                            # 将上传结果添加到转发结果中
-                            result["upload_success"] = True
-                        else:
-                            logger.error("媒体文件上传失败")
-                            result["upload_success"] = False
-                    except Exception as e:
-                        logger.error(f"上传过程中发生错误: {str(e)}")
+                except Exception as e:
+                    logger.error(f"下载媒体文件时出错: {repr(e)}")
+                    result["download_error"] = str(e)
+            else:
+                logger.info("所有消息转发成功，无需下载源频道消息")
+            
+            # 检查上传配置 - 由于禁止转发的情况已经处理了上传，这里只处理普通转发后上传的情况
+            upload_config = self.config.get_upload_config()
+            if not result.get("forwards_restricted", False) and upload_config.get("enabled", False) and upload_config.get("upload_after_forward", True):
+                logger.info("开始上传本地媒体文件...")
+                try:
+                    # 添加更多上传前的日志信息
+                    logger.info(f"上传配置: 临时文件夹={upload_config.get('temp_folder', 'temp')}")
+                    logger.info(f"目标频道: {', '.join(target_identifiers)}")
+                    
+                    # 调用Uploader上传媒体文件
+                    upload_success = await Uploader.create_and_upload(self.config_path)
+                    if upload_success:
+                        logger.info("媒体文件上传成功")
+                        # 将上传结果添加到转发结果中
+                        result["upload_success"] = True
+                    else:
+                        logger.error("媒体文件上传失败")
                         result["upload_success"] = False
-                        result["upload_error"] = str(e)
-                else:
+                except Exception as e:
+                    logger.error(f"上传过程中发生错误: {str(e)}")
+                    result["upload_success"] = False
+                    result["upload_error"] = str(e)
+            else:
+                if not result.get("forwards_restricted", False):
                     logger.info("媒体文件上传功能未启用或不需要在转发后上传")
             
             return result

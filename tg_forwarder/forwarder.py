@@ -81,21 +81,37 @@ class MessageForwarder:
             Dict[str, List[Optional[Message]]]: 转发结果，格式为 {target_channel: [forwarded_message, ...]}
         """
         results = defaultdict(list)
+        forwards_restricted = False
         
         for target_id in target_channels:
             logger.info(f"正在转发消息 {source_message.id} 到目标频道 (ID: {target_id})")
             
-            # 根据是否隐藏作者选择转发方式
-            if self.hide_author:
-                # 使用copy_message复制消息而不显示来源
-                forwarded = await source_message.copy(target_id)
-            else:
-                # 直接转发保留原始格式和作者
-                forwarded = await source_message.forward(target_id)
+            try:
+                # 根据是否隐藏作者选择转发方式
+                if self.hide_author:
+                    # 使用copy_message复制消息而不显示来源
+                    forwarded = await source_message.copy(target_id)
+                else:
+                    # 直接转发保留原始格式和作者
+                    forwarded = await source_message.forward(target_id)
+                
+                if forwarded:
+                    results[str(target_id)].append(forwarded)
+                    logger.info(f"成功转发消息 {source_message.id} 到目标频道 (ID: {target_id})")
             
-            if forwarded:
-                results[str(target_id)].append(forwarded)
-                logger.info(f"成功转发消息 {source_message.id} 到目标频道 (ID: {target_id})")
+            except Exception as e:
+                error_msg = str(e)
+                if "CHAT_FORWARDS_RESTRICTED" in error_msg:
+                    logger.warning(f"频道 {source_message.chat.id} 禁止转发消息，将使用备用方式")
+                    forwards_restricted = True
+                    # 不在这里处理备用转发，而是由调用者处理
+                    break
+                else:
+                    logger.error(f"转发消息 {source_message.id} 时出错: {e}")
+        
+        # 如果频道禁止转发，设置一个标记
+        if forwards_restricted:
+            results["forwards_restricted"] = True
             
         return results
     
@@ -111,6 +127,7 @@ class MessageForwarder:
             Dict[str, List[Optional[Message]]]: 转发结果
         """
         results = defaultdict(list)
+        forwards_restricted = False
         
         # 检查媒体组中是否有含Emoji的消息
         if self.skip_emoji_messages:
@@ -122,19 +139,34 @@ class MessageForwarder:
         for target_id in target_channels:
             logger.info(f"正在转发媒体组 {media_group[0].media_group_id} 到目标频道 (ID: {target_id})")
             
-            # 使用copy_media_group直接复制媒体组
-            client_to_use = self.get_client_instance()
-            
-            # 使用copy_media_group方法复制媒体组
-            copied = await client_to_use.copy_media_group(
-                chat_id=target_id,
-                from_chat_id=media_group[0].chat.id,
-                message_id=media_group[0].id
-            )
-            
-            results[str(target_id)].extend(copied)
-            logger.info(f"成功转发媒体组 {media_group[0].media_group_id} 到目标频道 (ID: {target_id}) (共{len(copied)}条)")
+            try:
+                # 使用copy_media_group直接复制媒体组
+                client_to_use = self.get_client_instance()
                 
+                # 使用copy_media_group方法复制媒体组
+                copied = await client_to_use.copy_media_group(
+                    chat_id=target_id,
+                    from_chat_id=media_group[0].chat.id,
+                    message_id=media_group[0].id
+                )
+                
+                results[str(target_id)].extend(copied)
+                logger.info(f"成功转发媒体组 {media_group[0].media_group_id} 到目标频道 (ID: {target_id}) (共{len(copied)}条)")
+            
+            except Exception as e:
+                error_msg = str(e)
+                if "CHAT_FORWARDS_RESTRICTED" in error_msg:
+                    logger.warning(f"频道 {media_group[0].chat.id} 禁止转发消息，将使用备用方式")
+                    forwards_restricted = True
+                    # 不在这里处理备用转发，而是由调用者处理
+                    break
+                else:
+                    logger.error(f"转发媒体组 {media_group[0].media_group_id} 时出错: {e}")
+        
+        # 如果频道禁止转发，设置一个标记
+        if forwards_restricted:
+            results["forwards_restricted"] = True
+            
         return results
     
     async def process_messages(self, source_channel: Union[str, int], target_channels: List[Union[str, int]], 
@@ -204,7 +236,9 @@ class MessageForwarder:
             "media_messages": 0,
             "skipped": 0,
             "skipped_emoji": 0,
-            "start_time": time.time()
+            "start_time": time.time(),
+            "failed_messages": [],  # 记录转发失败的消息ID
+            "forwards_restricted": False  # 标记源频道是否禁止转发
         }
         
         # 获取消息
@@ -252,6 +286,8 @@ class MessageForwarder:
         
         # 存储所有转发的消息
         forwarded_messages = defaultdict(list)
+        # 存储所有源消息，以备后续下载使用
+        source_messages = []
         
         # 处理分组后的消息
         for msg_type, msg_data in grouped_messages:
@@ -260,6 +296,19 @@ class MessageForwarder:
                     # 转发媒体组
                     media_group = msg_data
                     result = await self.forward_media_group(media_group, valid_targets)
+                    
+                    # 检查是否因禁止转发而停止
+                    if "forwards_restricted" in result:
+                        stats["forwards_restricted"] = True
+                        # 保存所有源消息以便后续处理
+                        source_messages.extend(media_group)
+                        # 记录所有媒体组消息ID为失败
+                        for msg in media_group:
+                            stats["failed_messages"].append(msg.id)
+                        stats["failed"] += len(media_group)
+                        stats["processed"] += len(media_group)
+                        # 停止继续处理
+                        break
                     
                     # 将转发结果添加到forwarded_messages
                     for target, messages in result.items():
@@ -272,14 +321,31 @@ class MessageForwarder:
                         stats["media_groups"] += 1
                     else:
                         stats["failed"] += len(media_group)
+                        # 记录转发失败的媒体组消息ID
+                        for msg in media_group:
+                            stats["failed_messages"].append(msg.id)
                     
                     # 更新媒体消息计数
                     stats["media_messages"] += len(media_group)
+                    # 保存源消息便于后续可能的处理
+                    source_messages.extend(media_group)
                 
                 else:
                     # 转发单条消息
                     message = msg_data
                     result = await self.forward_message(message, valid_targets)
+                    
+                    # 检查是否因禁止转发而停止
+                    if "forwards_restricted" in result:
+                        stats["forwards_restricted"] = True
+                        # 保存所有源消息以便后续处理
+                        source_messages.append(message)
+                        # 记录消息ID为失败
+                        stats["failed_messages"].append(message.id)
+                        stats["failed"] += 1
+                        stats["processed"] += 1
+                        # 停止继续处理
+                        break
                     
                     # 将转发结果添加到forwarded_messages
                     for target, messages in result.items():
@@ -291,12 +357,16 @@ class MessageForwarder:
                         stats["success"] += 1
                     else:
                         stats["failed"] += 1
+                        # 记录转发失败的消息ID
+                        stats["failed_messages"].append(message.id)
                     
                     # 更新消息类型计数
                     if message.media:
                         stats["media_messages"] += 1
                     else:
                         stats["text_messages"] += 1
+                    # 保存源消息便于后续可能的处理
+                    source_messages.append(message)
                 
                 # 防止处理太快触发限流
                 await asyncio.sleep(self.delay)
@@ -306,9 +376,18 @@ class MessageForwarder:
                 if msg_type == "media_group":
                     stats["failed"] += len(msg_data)
                     stats["processed"] += len(msg_data)
+                    # 记录转发失败的媒体组消息ID
+                    for msg in msg_data:
+                        stats["failed_messages"].append(msg.id)
+                    # 保存源消息便于后续可能的处理
+                    source_messages.extend(msg_data)
                 else:
                     stats["failed"] += 1
                     stats["processed"] += 1
+                    # 记录转发失败的消息ID
+                    stats["failed_messages"].append(msg_data.id)
+                    # 保存源消息便于后续可能的处理
+                    source_messages.append(msg_data)
         
         # 计算总耗时
         stats["end_time"] = time.time()
@@ -317,10 +396,16 @@ class MessageForwarder:
         
         # 添加转发消息列表到结果中
         stats["forwarded_messages"] = dict(forwarded_messages)
+        # 添加源消息列表到结果中
+        stats["source_messages"] = source_messages
         
         logger.info(f"消息处理完成: 总数 {stats['total']}, 处理 {stats['processed']}, 成功 {stats['success']}, 失败 {stats['failed']}, 跳过 {stats['skipped']}")
         if stats["skipped_emoji"] > 0:
             logger.info(f"跳过的Emoji消息数: {stats['skipped_emoji']}")
+        if stats["failed"] > 0:
+            logger.info(f"转发失败的消息ID: {stats['failed_messages']}")
+        if stats["forwards_restricted"]:
+            logger.warning(f"源频道 {source_chat_id} 禁止转发消息，需要使用备用方式")
         logger.info(f"耗时: {stats['duration']:.2f}秒")
         
         return stats
