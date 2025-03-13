@@ -131,20 +131,31 @@ class ColoredFormatter(logging.Formatter):
         return super().format(record)
 
 # 设置日志记录
-logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO
-)
-logger = logging.getLogger("CustomMediaGroupSender")
+# 在创建日志之前，先重置根日志配置
+for handler in logging.root.handlers[:]:
+    logging.root.removeHandler(handler)
 
-# 为日志添加彩色格式
+# 创建日志记录器
+logger = logging.getLogger("CustomMediaGroupSender")
+logger.setLevel(logging.INFO)
+# 防止日志传播到根日志记录器
+logger.propagate = False
+
+# 清除所有已有处理器
+for handler in logger.handlers[:]:
+    logger.removeHandler(handler)
+
+# 添加处理器
 if COLORAMA_AVAILABLE:
-    for handler in logger.handlers:
-        handler.setFormatter(ColoredFormatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s'))
-    if not logger.handlers:
-        handler = logging.StreamHandler()
-        handler.setFormatter(ColoredFormatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s'))
-        logger.addHandler(handler)
+    # 添加彩色日志处理器
+    handler = logging.StreamHandler()
+    handler.setFormatter(ColoredFormatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s'))
+    logger.addHandler(handler)
+else:
+    # 添加普通日志处理器
+    handler = logging.StreamHandler()
+    handler.setFormatter(logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s'))
+    logger.addHandler(handler)
 
 # 设置 pyrogram 的日志级别为 ERROR，减少连接和错误信息输出
 logging.getLogger("pyrogram").setLevel(logging.ERROR)
@@ -453,8 +464,9 @@ class CustomMediaGroupSender:
                     if ch.strip()
                 ]
                 
-                # 读取是否隐藏作者配置
-                config_dict["hide_author"] = config.getboolean("CHANNELS", "hide_author", fallback=False)
+            # 读取是否隐藏作者配置
+            if config.has_section("FORWARD"):
+                config_dict["hide_author"] = config.getboolean("FORWARD", "hide_author", fallback=False)
             
             # 读取临时文件夹配置
             if config.has_section("DOWNLOAD"):
