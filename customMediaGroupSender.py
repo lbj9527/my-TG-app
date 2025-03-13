@@ -145,16 +145,16 @@ logger.propagate = False
 for handler in logger.handlers[:]:
     logger.removeHandler(handler)
 
-# 添加处理器
+# 添加处理器 - 简化日志格式，去掉logger名称
 if COLORAMA_AVAILABLE:
     # 添加彩色日志处理器
     handler = logging.StreamHandler()
-    handler.setFormatter(ColoredFormatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s'))
+    handler.setFormatter(ColoredFormatter('%(asctime)s - %(levelname)s - %(message)s'))
     logger.addHandler(handler)
 else:
     # 添加普通日志处理器
     handler = logging.StreamHandler()
-    handler.setFormatter(logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s'))
+    handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
     logger.addHandler(handler)
 
 # 设置 pyrogram 的日志级别为 ERROR，减少连接和错误信息输出
@@ -810,6 +810,7 @@ class CustomMediaGroupSender:
                 
                 # 存储所有转发后的消息
                 forwarded_messages = []
+                total_success_messages = 0  # 添加计数器统计实际成功的消息数
                 
                 for i, batch in enumerate(batches):
                     try:
@@ -831,6 +832,9 @@ class CustomMediaGroupSender:
                                         message_id=batch[0].id
                                     )
                                     
+                                    # 添加代码更新转发成功消息计数
+                                    total_success_messages += len(batch_forwarded)
+                                    
                                     if COLORAMA_AVAILABLE:
                                         logger.info(f"{Fore.GREEN}使用copy_media_group成功转发媒体组批次 {i+1}/{len(batches)}{Style.RESET_ALL}")
                                     else:
@@ -847,6 +851,7 @@ class CustomMediaGroupSender:
                                                 message_id=msg.id
                                             )
                                             batch_forwarded.append(forwarded)
+                                            total_success_messages += 1  # 更新成功计数
                                         except Exception as inner_e:
                                             logger.error(f"复制消息 {msg.id} 失败: {str(inner_e)}")
                             else:
@@ -859,6 +864,7 @@ class CustomMediaGroupSender:
                                             message_id=msg.id
                                         )
                                         batch_forwarded.append(forwarded)
+                                        total_success_messages += 1  # 更新成功计数
                                     except Exception as e:
                                         logger.error(f"复制消息 {msg.id} 失败: {str(e)}")
                         else:
@@ -871,7 +877,8 @@ class CustomMediaGroupSender:
                                 from_chat_id=from_chat_id,
                                 message_ids=message_ids
                             )
-                            
+                            total_success_messages += len(batch_forwarded)  # 更新成功计数
+                        
                         # 将转发成功的消息添加到结果列表
                         forwarded_messages.extend(batch_forwarded)
                         
@@ -907,6 +914,7 @@ class CustomMediaGroupSender:
                                         message_id=msg.id
                                     )
                                     batch_forwarded.append(forwarded)
+                                    total_success_messages += 1  # 更新成功计数
                                 except Exception as inner_e:
                                     logger.error(f"重试复制消息 {msg.id} 失败: {str(inner_e)}")
                         else:
@@ -917,7 +925,8 @@ class CustomMediaGroupSender:
                                 from_chat_id=from_chat_id,
                                 message_ids=message_ids
                             )
-                            
+                            total_success_messages += len(batch_forwarded)  # 更新成功计数
+                        
                         # 将重试成功的消息添加到结果列表
                         forwarded_messages.extend(batch_forwarded)
                         
@@ -941,12 +950,19 @@ class CustomMediaGroupSender:
                     if TQDM_AVAILABLE and forward_pbar:
                         forward_pbar.update(1)
                         
-            if COLORAMA_AVAILABLE:
-                logger.info(f"{Fore.GREEN}{Style.BRIGHT}所有消息转发完成! {from_chat_id} -> {to_chat_id} (共 {len(forwarded_messages)} 条){Style.RESET_ALL}")
-            else:
-                logger.info(f"所有消息转发完成! {from_chat_id} -> {to_chat_id} (共 {len(forwarded_messages)} 条)")
+            # 根据实际转发成功的消息数评估整体成功与否
+            is_success = total_success_messages > 0
+            success_status = "成功" if is_success else "失败"
+            success_emoji = "✅" if is_success else "❌"
                 
-            return True, forwarded_messages
+            if COLORAMA_AVAILABLE:
+                status_color = Fore.GREEN if is_success else Fore.RED
+                logger.info(f"{status_color}{Style.BRIGHT}{success_emoji} 所有消息转发{success_status}! {from_chat_id} -> {to_chat_id} (共 {total_success_messages}/{len(messages)} 条){Style.RESET_ALL}")
+            else:
+                logger.info(f"{success_emoji} 所有消息转发{success_status}! {from_chat_id} -> {to_chat_id} (共 {total_success_messages}/{len(messages)} 条)")
+            
+            # 基于总消息而不是总批次的成功率判断整体是否成功
+            return total_success_messages > 0, forwarded_messages
             
         except Exception as e:
             logger.error(f"转发消息时出错: {str(e)}")
@@ -1107,15 +1123,26 @@ class CustomMediaGroupSender:
                     # 等待所有转发任务完成
                     for channel, task in forward_tasks:
                         try:
-                            forward_success, _ = await task
-                            results[channel] = results[channel] and forward_success
+                            forward_success, forward_messages = await task
+                            
+                            # 消息数计数
+                            message_count = len(forward_messages) if forward_messages else 0
+                            
+                            # 修改判断逻辑：
+                            # 1. 如果forward_success为True，那么即使message_count为0也视为成功
+                            # 2. 只有当forward_success为False且message_count为0时才认为是真正失败
+                            if not forward_success and message_count == 0:
+                                results[channel] = False
+                            else:
+                                # 如果forward_success为True或message_count大于0，则视为成功
+                                results[channel] = results[channel] and True
                             
                             if COLORAMA_AVAILABLE:
                                 status = f"{Fore.GREEN}成功{Style.RESET_ALL}" if forward_success else f"{Fore.RED}失败{Style.RESET_ALL}"
-                                logger.info(f"向频道 {channel} 转发{status}")
+                                logger.info(f"向频道 {channel} 转发{status} ({message_count} 条消息)")
                             else:
                                 status = "成功" if forward_success else "失败"
-                                logger.info(f"向频道 {channel} 转发{status}")
+                                logger.info(f"向频道 {channel} 转发{status} ({message_count} 条消息)")
                                 
                         except Exception as e:
                             logger.error(f"向频道 {channel} 转发时发生错误: {str(e)}")
