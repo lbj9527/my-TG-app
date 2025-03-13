@@ -8,6 +8,7 @@ from typing import Dict, Any, Optional, List, Union, Tuple
 from collections import defaultdict
 from pyrogram.types import Message
 from pyrogram.errors import FloodWait
+import re
 
 from tg_forwarder.utils.logger import get_logger
 from tg_forwarder.channel_parser import ChannelParser
@@ -48,8 +49,6 @@ class MessageForwarder:
         Returns:
             bool: 如果包含Emoji返回True，否则返回False
         """
-        import re
-        
         # Emoji表情的Unicode范围
         emoji_pattern = re.compile(
             "["
@@ -106,8 +105,20 @@ class MessageForwarder:
                     forwards_restricted = True
                     # 不在这里处理备用转发，而是由调用者处理
                     break
+                elif "FLOOD_WAIT" in error_msg:
+                    wait_time = re.search(r"FLOOD_WAIT_(\d+)", error_msg)
+                    wait_seconds = wait_time.group(1) if wait_time else "未知"
+                    logger.error(f"转发消息 {source_message.id} 时触发频率限制，需等待 {wait_seconds} 秒")
+                    results["error_messages"] = results.get("error_messages", []) + [f"消息 {source_message.id}: 触发频率限制，需等待 {wait_seconds} 秒"]
+                elif "CHAT_WRITE_FORBIDDEN" in error_msg:
+                    logger.error(f"转发消息 {source_message.id} 失败: 无权在目标频道 {target_id} 发送消息")
+                    results["error_messages"] = results.get("error_messages", []) + [f"消息 {source_message.id}: 无权在目标频道 {target_id} 发送消息"]
+                elif "PEER_ID_INVALID" in error_msg:
+                    logger.error(f"转发消息 {source_message.id} 失败: 目标频道 {target_id} ID无效")
+                    results["error_messages"] = results.get("error_messages", []) + [f"消息 {source_message.id}: 目标频道 {target_id} ID无效"]
                 else:
                     logger.error(f"转发消息 {source_message.id} 时出错: {e}")
+                    results["error_messages"] = results.get("error_messages", []) + [f"消息 {source_message.id}: {error_msg[:100]}"]
         
         # 如果频道禁止转发，设置一个标记
         if forwards_restricted:
@@ -160,8 +171,20 @@ class MessageForwarder:
                     forwards_restricted = True
                     # 不在这里处理备用转发，而是由调用者处理
                     break
+                elif "FLOOD_WAIT" in error_msg:
+                    wait_time = re.search(r"FLOOD_WAIT_(\d+)", error_msg)
+                    wait_seconds = wait_time.group(1) if wait_time else "未知"
+                    logger.error(f"转发媒体组 {media_group[0].media_group_id} 时触发频率限制，需等待 {wait_seconds} 秒")
+                    results["error_messages"] = results.get("error_messages", []) + [f"媒体组 {media_group[0].media_group_id}: 触发频率限制，需等待 {wait_seconds} 秒"]
+                elif "CHAT_WRITE_FORBIDDEN" in error_msg:
+                    logger.error(f"转发媒体组 {media_group[0].media_group_id} 失败: 无权在目标频道 {target_id} 发送消息")
+                    results["error_messages"] = results.get("error_messages", []) + [f"媒体组 {media_group[0].media_group_id}: 无权在目标频道 {target_id} 发送消息"]
+                elif "PEER_ID_INVALID" in error_msg:
+                    logger.error(f"转发媒体组 {media_group[0].media_group_id} 失败: 目标频道 {target_id} ID无效")
+                    results["error_messages"] = results.get("error_messages", []) + [f"媒体组 {media_group[0].media_group_id}: 目标频道 {target_id} ID无效"]
                 else:
                     logger.error(f"转发媒体组 {media_group[0].media_group_id} 时出错: {e}")
+                    results["error_messages"] = results.get("error_messages", []) + [f"媒体组 {media_group[0].media_group_id}: {error_msg[:100]}"]
         
         # 如果频道禁止转发，设置一个标记
         if forwards_restricted:
@@ -238,7 +261,8 @@ class MessageForwarder:
             "skipped_emoji": 0,
             "start_time": time.time(),
             "failed_messages": [],  # 记录转发失败的消息ID
-            "forwards_restricted": False  # 标记源频道是否禁止转发
+            "forwards_restricted": False,  # 标记源频道是否禁止转发
+            "error_messages": []  # 记录错误消息
         }
         
         # 获取消息
@@ -310,9 +334,14 @@ class MessageForwarder:
                         # 停止继续处理
                         break
                     
+                    # 收集错误信息
+                    if "error_messages" in result:
+                        stats["error_messages"].extend(result["error_messages"])
+                    
                     # 将转发结果添加到forwarded_messages
                     for target, messages in result.items():
-                        forwarded_messages[target].extend(messages)
+                        if target != "error_messages" and target != "forwards_restricted":
+                            forwarded_messages[target].extend(messages)
                     
                     success = any(bool(msgs) for msgs in result.values())
                     stats["processed"] += len(media_group)
@@ -347,9 +376,14 @@ class MessageForwarder:
                         # 停止继续处理
                         break
                     
+                    # 收集错误信息
+                    if "error_messages" in result:
+                        stats["error_messages"].extend(result["error_messages"])
+                    
                     # 将转发结果添加到forwarded_messages
                     for target, messages in result.items():
-                        forwarded_messages[target].extend(messages)
+                        if target != "error_messages" and target != "forwards_restricted":
+                            forwarded_messages[target].extend(messages)
                     
                     success = any(bool(msgs) for msgs in result.values())
                     stats["processed"] += 1
@@ -404,6 +438,35 @@ class MessageForwarder:
             logger.info(f"跳过的Emoji消息数: {stats['skipped_emoji']}")
         if stats["failed"] > 0:
             logger.info(f"转发失败的消息ID: {stats['failed_messages']}")
+            
+            # 输出详细的错误信息
+            if stats["error_messages"]:
+                logger.warning("转发失败的详细错误信息:")
+                for i, error_msg in enumerate(stats["error_messages"], 1):
+                    logger.warning(f"  {i}. {error_msg}")
+                    
+                # 如果错误信息超过5条，统计错误类型
+                if len(stats["error_messages"]) > 5:
+                    error_types = {}
+                    for msg in stats["error_messages"]:
+                        # 提取错误类型
+                        if "触发频率限制" in msg:
+                            error_type = "频率限制"
+                        elif "无权在目标频道" in msg:
+                            error_type = "权限不足"
+                        elif "ID无效" in msg:
+                            error_type = "频道ID无效"
+                        else:
+                            error_type = "其他错误"
+                        
+                        error_types[error_type] = error_types.get(error_type, 0) + 1
+                    
+                    # 输出错误类型统计
+                    logger.warning("错误类型统计:")
+                    for error_type, count in error_types.items():
+                        percentage = count / len(stats["error_messages"]) * 100
+                        logger.warning(f"  - {error_type}: {count}条 ({percentage:.1f}%)")
+        
         if stats["forwards_restricted"]:
             logger.warning(f"源频道 {source_chat_id} 禁止转发消息，需要使用备用方式")
         logger.info(f"耗时: {stats['duration']:.2f}秒")
