@@ -590,7 +590,21 @@ class CustomMediaGroupSender:
             return file_id
             
         except Exception as e:
-            logger.error(f"上传文件 {file_name} 失败: {str(e)}")
+            error_msg = str(e)
+            logger.error(f"上传文件 {file_name} 失败: {error_msg}")
+            
+            # 检查是否是file_id相关错误，如是则删除问题文件
+            if "NoneType" in error_msg and "file_id" in error_msg:
+                try:
+                    # 删除有问题的文件
+                    os.remove(file_path)
+                    if COLORAMA_AVAILABLE:
+                        logger.warning(f"{Fore.YELLOW}已删除无法处理的文件: {Fore.CYAN}{file_path}{Style.RESET_ALL}")
+                    else:
+                        logger.warning(f"已删除无法处理的文件: {file_path}")
+                except Exception as del_error:
+                    logger.error(f"删除文件失败: {file_path}, 错误: {str(del_error)}")
+                
             return None
     
     async def send_media_group_with_progress(self, chat_id: str, file_paths: List[str]) -> Tuple[bool, List[Message]]:
@@ -603,8 +617,14 @@ class CustomMediaGroupSender:
         if not file_paths:
             logger.warning("没有提供任何文件路径")
             return False, []
+        
+        # 首先过滤出存在的文件，确保后续所有操作都是安全的
+        file_paths = [path for path in file_paths if os.path.exists(path)]
+        if not file_paths:
+            logger.warning("所有提供的文件路径都不存在，无法继续")
+            return False, []
             
-        # 计算总文件大小
+        # 计算总文件大小 - 仅使用存在的文件
         total_size = sum(os.path.getsize(path) for path in file_paths)
         tracker = UploadProgressTracker(len(file_paths), total_size)
         
@@ -621,16 +641,23 @@ class CustomMediaGroupSender:
                  colour='magenta' if not COLORAMA_AVAILABLE else None) if TQDM_AVAILABLE else None as file_pbar:
             # 上传所有文件并获取文件ID
             media_list = []
+            valid_file_paths = []  # 创建一个有效文件路径列表
+            
             for file_path in file_paths:
+                # 文件已经在函数开始处过滤过，这里不需要再次检查
                 file_name = os.path.basename(file_path)
                 mime_type = mimetypes.guess_type(file_path)[0] or ""
                 
                 # 上传文件
                 file_id = await self.upload_file_for_media_group(file_path, tracker)
+                
                 if not file_id:
                     if TQDM_AVAILABLE and file_pbar:
                         file_pbar.update(1)
                     continue
+                
+                # 如果上传成功，添加到有效文件列表
+                valid_file_paths.append(file_path)
                     
                 # 根据媒体类型创建不同的媒体对象
                 if mime_type.startswith('image/'):
@@ -739,7 +766,9 @@ class CustomMediaGroupSender:
             
             tracker.complete_all()
             
-            logger.info(f"媒体组发送完成: {len(media_list)}/{len(file_paths)} 成功")
+            # 这里更新成功率的计算，使用有效文件路径和原始文件路径的对比
+            success_ratio = f"{len(media_list)}/{len(file_paths)}"
+            logger.info(f"媒体组发送完成: {success_ratio} 成功")
             return True, sent_messages
             
         except Exception as e:
@@ -956,6 +985,18 @@ class CustomMediaGroupSender:
                     logger.warning(f"文件组 {group_index+1} 中没有文件，跳过")
                     continue
                 
+                # 过滤不存在的文件
+                valid_file_paths = [path for path in file_paths if os.path.exists(path)]
+                if len(valid_file_paths) < len(file_paths):
+                    if COLORAMA_AVAILABLE:
+                        logger.warning(f"{Fore.YELLOW}文件组 {group_index+1} 中有 {len(file_paths) - len(valid_file_paths)} 个文件不存在，已自动过滤{Style.RESET_ALL}")
+                    else:
+                        logger.warning(f"文件组 {group_index+1} 中有 {len(file_paths) - len(valid_file_paths)} 个文件不存在，已自动过滤")
+                        
+                if not valid_file_paths:
+                    logger.warning(f"文件组 {group_index+1} 中没有有效文件，跳过")
+                    continue
+                
                 # 首先尝试从收藏夹发送到第一个频道
                 # 这里直接发送到第一个频道，后续会检测是否可以转发
                 first_channel = self.target_channels[0]
@@ -967,7 +1008,7 @@ class CustomMediaGroupSender:
                     logger.info(f"开始向第一个频道 {first_channel} 发送媒体组")
                 
                 # 向第一个频道发送
-                success, sent_messages = await self.send_media_group_with_progress(first_channel, file_paths)
+                success, sent_messages = await self.send_media_group_with_progress(first_channel, valid_file_paths)
                 results[first_channel] = results[first_channel] and success
                 
                 # 如果第一个频道发送成功并且有其他频道，则尝试转发到其他频道
@@ -1005,8 +1046,8 @@ class CustomMediaGroupSender:
                         
                         for test_channel in self.target_channels[1:]:
                             logger.info(f"频道测试: 检查 {test_channel} 是否允许转发")
-                            # 先向这个频道发送
-                            test_success, test_messages = await self.send_media_group_with_progress(test_channel, file_paths)
+                            # 先向这个频道发送 - 使用有效的文件路径
+                            test_success, test_messages = await self.send_media_group_with_progress(test_channel, valid_file_paths)
                             if not test_success or not test_messages:
                                 logger.warning(f"频道测试: {test_channel} 发送媒体失败，跳过检查")
                                 continue
@@ -1094,7 +1135,7 @@ class CustomMediaGroupSender:
                         else:
                             logger.info(f"开始向频道 {channel} 发送媒体组 ({i}/{len(self.target_channels)-1})")
                             
-                        channel_success, _ = await self.send_media_group_with_progress(channel, file_paths)
+                        channel_success, _ = await self.send_media_group_with_progress(channel, valid_file_paths)
                         results[channel] = results[channel] and channel_success
                 
             # 更新频道进度条
