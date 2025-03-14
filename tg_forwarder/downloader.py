@@ -1,5 +1,5 @@
 """
-媒体下载模块，负责下载消息中的媒体文件到本地
+媒体下载模块，负责下载Telegram消息中的媒体文件
 """
 
 import os
@@ -77,6 +77,7 @@ else:
     WAIT_BAR_FORMAT = '{desc}: {remaining}s'
 
 from tg_forwarder.utils.logger import get_logger
+from tg_forwarder.utils.common import format_size, format_time, get_client_instance
 
 # 自定义彩色日志格式
 class ColoredFormatter:
@@ -192,17 +193,6 @@ class DownloadProgressTracker:
                     f"用时: {elapsed:.2f}秒 | "
                     f"平均速度: {format_size(speed)}/s"
                 )
-
-def format_size(size_bytes: int) -> str:
-    """将字节大小转换为人类可读格式"""
-    if size_bytes < 1024:
-        return f"{size_bytes} B"
-    elif size_bytes < 1024 * 1024:
-        return f"{size_bytes/1024:.1f} KB"
-    elif size_bytes < 1024 * 1024 * 1024:
-        return f"{size_bytes/(1024*1024):.1f} MB"
-    else:
-        return f"{size_bytes/(1024*1024*1024):.1f} GB"
 
 class MediaDownloader:
     """媒体下载器类，负责下载消息中的媒体文件"""

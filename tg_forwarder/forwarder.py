@@ -13,6 +13,8 @@ import re
 from tg_forwarder.utils.logger import get_logger
 from tg_forwarder.channel_parser import ChannelParser
 from tg_forwarder.media_handler import MediaHandler
+# 导入公共工具函数
+from tg_forwarder.utils.common import get_client_instance
 
 logger = get_logger("forwarder")
 
@@ -507,13 +509,5 @@ class MessageForwarder:
         Raises:
             ValueError: 如果找不到有效的客户端实例
         """
-        # 首先检查self.client.client (常见情况)
-        if hasattr(self.client, 'client') and self.client.client is not None:
-            return self.client.client
-            
-        # 如果没有.client属性，检查self.client本身
-        if self.client is not None:
-            return self.client
-            
-        # 如果都不可用，抛出错误
-        raise ValueError("无法获取有效的客户端实例")
+        # 使用公共模块中的函数
+        return get_client_instance(self.client)

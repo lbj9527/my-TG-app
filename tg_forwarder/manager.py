@@ -222,33 +222,26 @@ class ForwardManager:
                             
                             logger.info(f"已对上传目标频道进行排序，优先使用允许转发的频道")
                             
-                            # 读取配置
-                            config_parser = configparser.ConfigParser()
-                            config_parser.read(self.config_path, encoding='utf-8')
-                            
-                            api_id = config_parser.getint('API', 'api_id')
-                            api_hash = config_parser.get('API', 'api_hash')
+                            # 从已有的Config实例获取配置信息，避免重复读取配置文件
+                            api_config = self.config.get_api_config()
+                            api_id = api_config['api_id']
+                            api_hash = api_config['api_hash']
                             
                             # 获取正确的代理配置
                             proxy = None
-                            if config_parser.has_section('PROXY') and config_parser.getboolean('PROXY', 'enabled', fallback=False):
-                                proxy_type = config_parser.get('PROXY', 'proxy_type')
-                                addr = config_parser.get('PROXY', 'addr')
-                                port = config_parser.getint('PROXY', 'port')
-                                username = config_parser.get('PROXY', 'username', fallback=None) or None
-                                password = config_parser.get('PROXY', 'password', fallback=None) or None
-                                
+                            proxy_config = self.config.get_proxy_config()
+                            if proxy_config:
                                 proxy = {
-                                    "scheme": proxy_type.lower(),
-                                    "hostname": addr,
-                                    "port": port
+                                    "scheme": proxy_config['proxy_type'].lower(),
+                                    "hostname": proxy_config['addr'],
+                                    "port": proxy_config['port']
                                 }
                                 
-                                if username:
-                                    proxy["username"] = username
+                                if 'username' in proxy_config and proxy_config['username']:
+                                    proxy["username"] = proxy_config['username']
                                     
-                                if password:
-                                    proxy["password"] = password
+                                if 'password' in proxy_config and proxy_config['password']:
+                                    proxy["password"] = proxy_config['password']
                             
                             # 使用新的参数调用upload_from_source
                             async with Client(
@@ -259,14 +252,13 @@ class ForwardManager:
                             ) as client:
                                 media_sender = CustomMediaGroupSender(
                                     client=client,
-                                    config_parser=config_parser,
                                     target_channels=sorted_target_channels,
                                     temp_folder=download_config['temp_folder'],
                                     channel_forward_status=self.channel_forward_status
                                 )
                                 
                                 # 使用对象实例方法而非类方法
-                                upload_result = await media_sender.upload_from_source(
+                                upload_result = await media_sender.upload_from_source_instance(
                                     source_dir=download_config['temp_folder'],
                                     filter_pattern="*",
                                     batch_size=10,
