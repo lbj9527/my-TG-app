@@ -15,6 +15,7 @@ from contextlib import redirect_stdout, redirect_stderr
 from typing import List, Dict, Tuple, Any, Optional, Callable
 from datetime import datetime
 import argparse
+import glob
 
 from pyrogram import Client
 from pyrogram.types import InputMediaPhoto, InputMediaVideo, InputMediaDocument, Message
@@ -420,147 +421,96 @@ def parse_channel_identifier(channel: str) -> str:
 class CustomMediaGroupSender:
     """自定义媒体组发送器，支持带进度显示的媒体组发送"""
     
-    def _load_config(self, config_path: str) -> dict:
+    def __init__(self, client: Client, config_parser=None, target_channels: List[str] = None, temp_folder: str = None, 
+                channel_forward_status: Dict[str, bool] = None):
         """
-        从配置文件加载配置
+        初始化媒体组发送器
         
         参数:
-            config_path: 配置文件路径
-            
-        返回:
-            dict: 配置字典
+            client: Pyrogram客户端
+            config_parser: ConfigParser对象或配置字典
+            target_channels: 目标频道列表 (可选，如未提供将从配置文件读取)
+            temp_folder: 临时文件夹路径 (可选，如未提供将从配置文件读取)
+            channel_forward_status: 预检查的频道转发状态 {频道ID: 是否允许转发}
         """
-        config_dict = {
+        self.client = client
+        
+        # 设置自定义配置字典，用于内部使用
+        self.config = {
             "temp_folder": "temp",
             "target_channels": [],
             "max_concurrent_batches": 3,
-            "hide_author": False
+            "hide_author": False,
+            "max_concurrent_uploads": 3,
         }
         
-        if not os.path.exists(config_path):
-            logger.warning(f"配置文件不存在: {config_path}，将使用默认配置")
-            return config_dict
-            
-        try:
-            config = configparser.ConfigParser()
-            config.read(config_path, encoding='utf-8')
-            
-            # 读取频道配置
-            if config.has_section("CHANNELS"):
-                target_channels_str = config.get("CHANNELS", "target_channels", fallback="")
-                config_dict["target_channels"] = [
+        # 如果提供了目标频道，使用提供的，否则从配置文件读取
+        if target_channels:
+            self.target_channels = target_channels
+        elif config_parser and isinstance(config_parser, configparser.ConfigParser):
+            if config_parser.has_section("CHANNELS"):
+                target_channels_str = config_parser.get("CHANNELS", "target_channels", fallback="")
+                self.target_channels = [
                     ch.strip() 
                     for ch in target_channels_str.split(",") 
                     if ch.strip()
                 ]
-                
-            # 读取是否隐藏作者配置
-            if config.has_section("FORWARD"):
-                config_dict["hide_author"] = config.getboolean("FORWARD", "hide_author", fallback=False)
+            else:
+                self.target_channels = []
+        else:
+            self.target_channels = []
             
-            # 读取临时文件夹配置
-            if config.has_section("DOWNLOAD"):
-                config_dict["temp_folder"] = config.get("DOWNLOAD", "temp_folder", fallback="temp")
-                
-            # 读取并发上传数配置
-            if config.has_section("PERFORMANCE"):
-                config_dict["max_concurrent_batches"] = config.getint("PERFORMANCE", "max_concurrent_batches", fallback=3)
-            
-            return config_dict
-            
-        except Exception as e:
-            logger.error(f"加载配置文件出错: {str(e)}，将使用默认配置")
-            return config_dict
-    
-    def __init__(self, client: Client, config_path: str, target_channels: List[str] = None, temp_folder: str = None):
-        """
-        初始化自定义媒体发送器
-        
-        参数:
-            client: Pyrogram客户端
-            config_path: 配置文件路径
-            target_channels: 目标频道列表，如未提供则从配置文件读取
-            temp_folder: 临时文件夹路径，如未提供则从配置文件读取
-        """
-        self.client = client
-        
-        # 读取配置文件
-        self.config = configparser.ConfigParser()
-        self.config.read(config_path, encoding='utf-8')
-        
-        # 设置目标频道
-        self.target_channels = target_channels or []
-        
-        # 如果没有提供目标频道，从配置文件读取
-        if not self.target_channels and self.config.has_section("CHANNELS"):
-            target_channels_str = self.config.get("CHANNELS", "target_channels", fallback="")
-            self.target_channels = [
-                ch.strip() 
-                for ch in target_channels_str.split(",") 
-                if ch.strip()
-            ]
-            
-        # 解析频道标识符为Pyrogram可用的格式
-        for i, channel in enumerate(self.target_channels):
-            self.target_channels[i] = parse_channel_identifier(channel)
-            
-        # 过滤掉明显无效的频道
-        original_count = len(self.target_channels)
-        filtered_channels = []
-        for channel in self.target_channels:
-            # 检测带+号的频道名（这通常是错误格式）
-            if channel.startswith('@+'):
-                logger.warning(f"频道名 {channel} 无效（带有+号前缀），将被跳过")
-                continue
-            # 检测过长或过短的频道名
-            elif channel.startswith('@'):
-                username = channel[1:]
-                if len(username) < 5:
-                    logger.warning(f"频道名 {channel} 可能无效（用户名太短），但将尝试使用")
-                elif len(username) > 32:
-                    logger.warning(f"频道名 {channel} 可能无效（用户名太长），但将尝试使用")
-                elif not re.match(r'^[a-zA-Z0-9_]{5,32}$', username):
-                    logger.warning(f"频道名 {channel} 可能包含无效字符，但将尝试使用")
-                
-            filtered_channels.append(channel)
-            
-        if len(filtered_channels) < original_count:
-            logger.warning(f"已过滤 {original_count - len(filtered_channels)} 个无效频道名")
-            
-        self.target_channels = filtered_channels
-        
-        # 检查是否有有效的目标频道
-        if not self.target_channels:
-            logger.error("没有设置任何有效的目标频道，请检查配置文件")
-            print("\n" + "="*60)
-            print("❌ 错误: 没有设置任何有效的目标频道")
-            print("💡 请在config.ini文件的[CHANNELS]部分设置target_channels")
-            print("="*60 + "\n")
-        
         # 设置临时文件夹
         if temp_folder:
             self.temp_folder = temp_folder
-        elif self.config.has_section("DOWNLOAD"):
-            self.temp_folder = self.config.get("DOWNLOAD", "temp_folder", fallback="temp")
+        elif config_parser and isinstance(config_parser, configparser.ConfigParser):
+            if config_parser.has_section("DOWNLOAD"):
+                self.temp_folder = config_parser.get("DOWNLOAD", "temp_folder", fallback="temp")
+            else:
+                self.temp_folder = "temp"
         else:
             self.temp_folder = "temp"
             
-        # 读取其他配置
-        self.max_concurrent_uploads = 3
-        self.hide_author = True
+        # 确保临时文件夹存在
+        os.makedirs(self.temp_folder, exist_ok=True)
         
-        if self.config.has_section("UPLOAD"):
-            self.max_concurrent_uploads = self.config.getint("UPLOAD", "max_concurrent_batches", fallback=3)
+        # 读取其他配置
+        if config_parser and isinstance(config_parser, configparser.ConfigParser):
+            if config_parser.has_section("FORWARD"):
+                self.hide_author = config_parser.getboolean("FORWARD", "hide_author", fallback=False)
+                self.max_concurrent_batches = config_parser.getint("FORWARD", "max_concurrent_batches", fallback=3)
+            else:
+                self.hide_author = False
+                self.max_concurrent_batches = 3
             
-        if self.config.has_section("PRIVACY"):
-            self.hide_author = self.config.getboolean("PRIVACY", "hide_author", fallback=True)
-            logger.info(f"隐藏消息来源: {self.hide_author}")
+            if config_parser.has_section("UPLOAD"):
+                self.max_concurrent_uploads = config_parser.getint("UPLOAD", "max_concurrent_batches", fallback=3)
+            else:
+                self.max_concurrent_uploads = 3
+                
+            if config_parser.has_section("PRIVACY"):
+                self.hide_author = config_parser.getboolean("PRIVACY", "hide_author", fallback=True)
+        else:
+            self.hide_author = False
+            self.max_concurrent_batches = 3
+            self.max_concurrent_uploads = 3
+            
+        # 更新配置字典
+        self.config["temp_folder"] = self.temp_folder
+        self.config["target_channels"] = self.target_channels
+        self.config["hide_author"] = self.hide_author
+        self.config["max_concurrent_batches"] = self.max_concurrent_batches
+        self.config["max_concurrent_uploads"] = self.max_concurrent_uploads
         
         # 创建并发信号量
         self.semaphore = asyncio.Semaphore(self.max_concurrent_uploads)
         
-        # 确保临时文件夹存在
-        os.makedirs(self.temp_folder, exist_ok=True)
+        # 存储预检查的频道转发状态
+        self.channel_forward_status = channel_forward_status or {}
+        
+        # 解析频道标识符为Pyrogram可用的格式
+        for i, channel in enumerate(self.target_channels):
+            self.target_channels[i] = parse_channel_identifier(channel)
         
         # 初始化日志
         logger.info(f"媒体发送器初始化完成: 目标频道数 {len(self.target_channels)}")
@@ -1145,232 +1095,169 @@ class CustomMediaGroupSender:
             logger.error(f"转发过程发生错误: {str(e)[:50]}...")
             return False, []
     
-    async def send_to_all_channels(self, file_paths_groups: List[List[str]]) -> Dict[str, bool]:
+    async def send_to_all_channels(self, file_paths: List[str]) -> Dict[str, Any]:
         """
-        发送媒体组到所有目标频道
+        按照优化流程发送媒体文件到所有目标频道:
+        1. 先上传到me获取file_id
+        2. 找到第一个允许转发的频道并发送
+        3. 从该频道转发到其他频道
         
         参数:
-            file_paths_groups: 文件路径组列表，每个子列表是一组要发送的文件
+            file_paths: 媒体文件路径列表
             
         返回:
-            Dict[str, bool]: 发送结果，键为频道ID，值为是否所有文件组都发送成功
+            Dict: 包含成功/失败统计和每个频道的消息列表
         """
-        if not self.target_channels:
-            logger.error("没有设置目标频道")
-            return {}
-            
-        results = {channel: True for channel in self.target_channels}
+        start_time = time.time()
+        results = {
+            "success": 0,          # 成功发送的频道数
+            "fail": 0,             # 失败发送的频道数
+            "messages_by_channel": {}  # 每个频道的消息列表
+        }
         
-        # 创建频道发送进度条
-        channel_desc = "处理频道"
-        with tqdm(total=len(self.target_channels), desc=channel_desc, unit="个", position=0,
-                 bar_format=TOTAL_BAR_FORMAT,
-                 colour='cyan') if TQDM_AVAILABLE else None as channel_pbar:
+        # 验证有效频道
+        valid_channels = await self.validate_channels()
+        if not valid_channels:
+            logger.error("❌ 没有有效的目标频道，上传被终止")
+            return results
             
-            # 处理每一组文件
-            for group_index, file_paths in enumerate(file_paths_groups):
-                # 简化日志，不输出处理文件组的信息
+        logger.info(f"🚀 开始处理 {len(file_paths)} 个文件到 {len(valid_channels)} 个频道")
+        
+        # 第一步：上传到me获取file_id并组装媒体组件
+        logger.info("📤 步骤1：上传文件到'me'获取file_id")
+        media_components = await self.first_upload_to_me(file_paths)
+        if not media_components:
+            logger.error("❌ 没有成功上传任何媒体文件，流程终止")
+            results["fail"] = len(valid_channels)
+            return results
+            
+        # 第二步：根据缓存的频道转发状态，找到第一个允许转发的频道
+        logger.info("🔍 步骤2：查找合适的第一个频道作为转发源")
+        first_channel = None
+        
+        # 优先使用允许转发的频道
+        if self.channel_forward_status:
+            # 按照转发状态对频道进行排序
+            sorted_channels = sorted(
+                valid_channels,
+                key=lambda x: 0 if self.channel_forward_status.get(str(x), True) else 1
+            )
+            
+            # 找到第一个允许转发的频道
+            for channel in sorted_channels:
+                if self.channel_forward_status.get(str(channel), True):
+                    first_channel = channel
+                    logger.info(f"✅ 找到允许转发的频道: {first_channel}")
+                    break
+        
+        # 如果没有找到允许转发的频道，使用第一个有效频道
+        if not first_channel and valid_channels:
+            first_channel = valid_channels[0]
+            logger.warning(f"⚠️ 没有找到允许转发的频道，将使用第一个有效频道: {first_channel}（可能不允许转发）")
+        
+        if not first_channel:
+            logger.error("❌ 无法确定第一个目标频道，流程终止")
+            results["fail"] = len(valid_channels)
+            return results
+            
+        # 发送媒体组到第一个频道
+        logger.info(f"📤 正在发送媒体组到第一个频道: {first_channel}")
+        try:
+            # 发送媒体组
+            messages = await self.client.send_media_group(
+                chat_id=first_channel,
+                media=media_components
+            )
+            
+            if messages:
+                logger.info(f"✅ 成功发送到第一个频道 {first_channel}，共 {len(messages)} 条消息")
+                results["success"] += 1
+                results["messages_by_channel"][str(first_channel)] = messages
                 
-                if not file_paths:
-                    # 简化日志，不输出没有文件的警告
-                    continue
-                
-                # 过滤不存在的文件
-                valid_file_paths = [path for path in file_paths if os.path.exists(path)]
-                if len(valid_file_paths) < len(file_paths):
-                    # 简化日志，不输出文件过滤信息
-                    pass
-                        
-                if not valid_file_paths:
-                    # 简化日志，不输出没有有效文件的警告
-                    continue
-                
-                # 首先尝试从收藏夹发送到第一个频道
-                # 这里直接发送到第一个频道，后续会检测是否可以转发
-                first_channel = self.target_channels[0]
-                
-                # 向第一个频道发送
-                success, sent_messages = await self.send_media_group_with_progress(first_channel, valid_file_paths)
-                results[first_channel] = results[first_channel] and success
-                
-                # 如果第一个频道发送成功并且有其他频道，则尝试转发到其他频道
-                if success and sent_messages and len(self.target_channels) > 1:
-                    # 首先验证第一个频道是否可以转发
-                    can_forward = True
-                    try:
-                        # 获取频道完整信息，检查has_protected_content属性
-                        chat_info = await self.client.get_chat(first_channel)
-                        
-                        # 通过has_protected_content属性判断是否禁止转发
-                        if chat_info.has_protected_content:
-                            can_forward = False
-                            logger.warning(f"频道限制: {first_channel} 禁止转发 (has_protected_content=True)，将寻找其他可转发频道")
-                        else:
-                            # 记录日志但不输出详细信息，简化代码
-                            logger.info(f"频道 {first_channel} 允许转发 (has_protected_content=False) ✓")
-                    except Exception as e:
-                        # 如果获取频道信息失败，回退到原方法：尝试向自己转发一条消息测试
-                        logger.warning(f"获取频道 {first_channel} 的保护内容状态失败: {str(e)[:100]}")
-                        logger.warning("回退到测试转发方式判断频道状态")
-                        
-                        try:
-                            # 尝试向自己转发一条消息，测试是否可以转发
-                            test_forward = await self.client.forward_messages(
-                                chat_id="me",
-                                from_chat_id=first_channel,
-                                message_ids=[sent_messages[0].id]
-                            )
-                            # 测试完成后删除测试消息
-                            if test_forward:
-                                await test_forward[0].delete()
-                        except Exception as forward_err:
-                            if "CHAT_FORWARDS_RESTRICTED" in str(forward_err):
-                                can_forward = False
-                                logger.warning(f"频道限制: {first_channel} 禁止转发，将寻找其他可转发频道")
-                            else:
-                                # 其他错误可能是权限问题等
-                                logger.warning(f"测试转发时出错: {str(forward_err)[:100]}")
+                # 第三步：从第一个频道转发到其他频道
+                if len(valid_channels) > 1:
+                    logger.info("↪️ 步骤3：从第一个频道转发到其他频道")
+                    remaining_channels = [ch for ch in valid_channels if ch != first_channel]
                     
-                    # 如果第一个频道可以转发，直接从它转发到其他频道
-                    source_channel = first_channel
-                    source_messages = sent_messages
+                    # 使用缓存的转发状态，而不是重新检查
+                    can_forward = self.channel_forward_status.get(str(first_channel), True)
                     
-                    # 如果第一个频道不可转发，尝试找到一个可转发的频道
-                    if not can_forward and len(self.target_channels) > 1:
-                        # 查找可转发的频道
-                        found_unrestricted = False
-                        # 简化日志，不输出开始查找信息
+                    if can_forward:
+                        # 可以使用转发
+                        forward_source = first_channel
+                        source_messages = messages
                         
-                        for test_channel in self.target_channels[1:]:
-                            # 简化日志，不输出每个频道测试信息
-                            # 先向这个频道发送 - 使用有效的文件路径
-                            test_success, test_messages = await self.send_media_group_with_progress(test_channel, valid_file_paths)
-                            if not test_success or not test_messages:
-                                # 简化日志，不输出发送失败信息
-                                continue
-                                
-                            # 测试是否可以转发
+                        # 转发到其他频道
+                        for target_channel in remaining_channels:
                             try:
-                                # 获取频道完整信息，检查has_protected_content属性
-                                chat_info = await self.client.get_chat(test_channel)
+                                logger.info(f"↪️ 从 {forward_source} 转发到 {target_channel}")
+                                forward_result = await self.forward_media_messages(
+                                    from_chat_id=forward_source,
+                                    to_chat_id=target_channel,
+                                    messages=source_messages,
+                                    hide_author=self.hide_author
+                                )
                                 
-                                # 检查是否允许转发
-                                if not chat_info.has_protected_content:
-                                    # 允许转发，使用这个频道作为源
-                                    source_channel = test_channel
-                                    source_messages = test_messages
-                                    found_unrestricted = True
-                                    results[test_channel] = True
-                                    logger.info(f"频道 {test_channel} 允许转发 (has_protected_content=False) ✓ - 将作为转发源")
-                                    break
+                                if forward_result[0]:  # 成功
+                                    results["success"] += 1
+                                    results["messages_by_channel"][str(target_channel)] = forward_result[1]
+                                    logger.info(f"✅ 转发到 {target_channel} 成功")
                                 else:
-                                    logger.warning(f"频道 {test_channel} 禁止转发 (has_protected_content=True)")
-                            except Exception as e:
-                                # 如果获取频道信息失败，回退到原方法：尝试向自己转发消息测试
-                                logger.warning(f"获取频道 {test_channel} 的保护内容状态失败: {str(e)[:100]}")
-                                
-                                # 回退到测试转发方式
-                                try:
-                                    test_forward = await self.client.forward_messages(
-                                        chat_id="me",
-                                        from_chat_id=test_channel,
-                                        message_ids=[test_messages[0].id]
+                                    logger.error(f"❌ 转发到 {target_channel} 失败，尝试直接发送")
+                                    # 如果转发失败，尝试直接发送
+                                    direct_send = await self.client.send_media_group(
+                                        chat_id=target_channel,
+                                        media=media_components
                                     )
-                                    # 可以转发，使用这个频道作为源
-                                    if test_forward:
-                                        await test_forward[0].delete()
-                                        source_channel = test_channel
-                                        source_messages = test_messages
-                                        found_unrestricted = True
-                                        results[test_channel] = True
-                                        logger.info(f"频道 {test_channel} 允许转发 ✓ - 将作为转发源")
-                                        break
-                                except Exception as forward_err:
-                                    # 转发失败，继续检查下一个频道
-                                    continue
-                                
-                        if not found_unrestricted:
-                            logger.warning("所有频道均禁止转发，将使用复制替代转发")
-                            
-                    # 简化日志，只记录开始并行转发的目标频道数量
-                    logger.info(f"开始并行转发到 {len(self.target_channels)-1} 个频道")
-                    
-                    # 创建转发任务列表，排除源频道
-                    forward_tasks = []
-                    remaining_channels = [ch for ch in self.target_channels if ch != source_channel]
-                    
-                    # 并行转发到其他频道
-                    for i, channel in enumerate(remaining_channels, 1):
-                        # 简化日志，不输出每个准备转发的信息
-                            
-                        # 创建转发任务
-                        forward_task = self.forward_media_messages(
-                            source_channel, 
-                            channel, 
-                            source_messages,
-                            hide_author=self.hide_author
-                        )
-                        forward_tasks.append((channel, forward_task))
-                    
-                    # 等待所有转发任务完成
-                    for channel, task in forward_tasks:
-                        try:
-                            forward_success, forward_messages = await task
-                            
-                            # 消息数计数
-                            message_count = len(forward_messages) if forward_messages else 0
-                            
-                            # 修改判断逻辑：
-                            # 1. 如果forward_success为True，那么即使message_count为0也视为成功
-                            # 2. 只有当forward_success为False且message_count为0时才认为是真正失败
-                            if not forward_success and message_count == 0:
-                                results[channel] = False
-                            else:
-                                # 如果forward_success为True或message_count大于0，则视为成功
-                                results[channel] = results[channel] and True
-                            
-                            # 日志输出已经在forward_media_messages中处理，这里不重复输出
-                                
-                        except Exception as e:
-                            # 改进错误日志
-                            error_msg = str(e)
-                            if "USERNAME_NOT_OCCUPIED" in error_msg:
-                                logger.error(f"频道名不存在: {channel} - 请检查配置文件中的频道名称是否正确")
-                            elif "Peer id invalid" in error_msg:
-                                logger.error(f"频道ID解析错误: {channel} - 请确认频道是否存在")
-                            elif "CHAT_FORWARDS_RESTRICTED" in error_msg:
-                                logger.warning(f"频道转发限制: {channel} - 该频道禁止转发消息")
-                            else:
-                                # 简化错误输出但保留较多信息
-                                if len(error_msg) > 100:
-                                    error_msg = error_msg[:100] + "..."
-                                logger.error(f"转发到 {channel} 失败: {error_msg}")
-                            
-                            results[channel] = False
+                                    if direct_send:
+                                        results["success"] += 1
+                                        results["messages_by_channel"][str(target_channel)] = direct_send
+                                        logger.info(f"✅ 直接发送到 {target_channel} 成功")
+                                    else:
+                                        results["fail"] += 1
+                                        logger.error(f"❌ 无法发送到 {target_channel}")
+                            except Exception as e:
+                                results["fail"] += 1
+                                logger.error(f"❌ 转发到 {target_channel} 时出错: {str(e)}")
+                    else:
+                        # 不能使用转发，直接发送到每个目标频道
+                        logger.warning(f"⚠️ 第一个频道 {first_channel} 不允许转发，将直接发送到其他频道")
+                        for target_channel in remaining_channels:
+                            try:
+                                logger.info(f"📤 直接发送到 {target_channel}")
+                                direct_send = await self.client.send_media_group(
+                                    chat_id=target_channel,
+                                    media=media_components
+                                )
+                                if direct_send:
+                                    results["success"] += 1
+                                    results["messages_by_channel"][str(target_channel)] = direct_send
+                                    logger.info(f"✅ 发送到 {target_channel} 成功")
+                                else:
+                                    results["fail"] += 1
+                                    logger.error(f"❌ 发送到 {target_channel} 失败")
+                            except Exception as e:
+                                results["fail"] += 1
+                                logger.error(f"❌ 发送到 {target_channel} 时出错: {str(e)}")
+            else:
+                logger.error(f"❌ 发送到第一个频道 {first_channel} 失败")
+                results["fail"] += len(valid_channels)
+        except Exception as e:
+            logger.error(f"❌ 发送到第一个频道 {first_channel} 时出错: {str(e)}")
+            results["fail"] += len(valid_channels)
                 
-                # 如果第一个频道发送失败或者为空，尝试逐个发送到每个频道
-                elif (not success or not sent_messages) and len(self.target_channels) > 1:
-                    logger.warning("第一个频道发送失败，尝试单独发送到其他频道")
-                    
-                    # 单独发送到其他频道
-                    for i, channel in enumerate(self.target_channels[1:], 1):
-                        # 简化日志，不输出每个发送的详细信息
-                            
-                        channel_success, _ = await self.send_media_group_with_progress(channel, valid_file_paths)
-                        results[channel] = results[channel] and channel_success
-                
-            # 更新频道进度条
-            if TQDM_AVAILABLE and channel_pbar:
-                channel_pbar.update(len(self.target_channels))
-            
+        # 统计结果
+        elapsed_time = time.time() - start_time
+        logger.info(f"✅ 全部完成! 成功: {results['success']}/{len(valid_channels)}，耗时: {elapsed_time:.2f}秒")
+        
         return results
 
     async def validate_channels(self) -> List[str]:
         """
-        验证目标频道是否存在，同时检查哪些频道禁止转发
+        验证目标频道是否存在且有权限
         
         返回:
-            List[str]: 有效的频道列表
+            List[str]: 有效的目标频道列表
         """
         if not self.target_channels:
             logger.error("没有设置目标频道")
@@ -1390,8 +1277,14 @@ class CustomMediaGroupSender:
                 # 检查是否禁止转发
                 if hasattr(chat, 'has_protected_content') and chat.has_protected_content:
                     protected_channels.append(channel)
+                    # 更新转发状态缓存
+                    if self.channel_forward_status is not None:
+                        self.channel_forward_status[str(channel)] = False
                     logger.info(f"✅ 频道验证成功: {channel} ({chat.title}) - ⚠️ 禁止转发 (has_protected_content=True)")
                 else:
+                    # 更新转发状态缓存
+                    if self.channel_forward_status is not None:
+                        self.channel_forward_status[str(channel)] = True
                     logger.info(f"✅ 频道验证成功: {channel} ({chat.title}) - 允许转发 (has_protected_content=False)")
             except Exception as e:
                 error_msg = str(e)
@@ -1422,11 +1315,17 @@ class CustomMediaGroupSender:
             # 如果第一个频道禁止转发，输出更明确的提示
             if protected_channels and self.target_channels[0] in protected_channels:
                 logger.warning("⚠️ 第一个目标频道禁止转发，系统将尝试查找其他可转发的频道作为源")
+                
+        # 根据转发状态排序：将允许转发的频道排在前面
+        if self.channel_forward_status and valid_channels:
+            logger.info("根据转发状态对频道进行排序，优先使用允许转发的频道")
+            valid_channels.sort(key=lambda x: 0 if self.channel_forward_status.get(str(x), True) else 1)
             
         return valid_channels
 
     @classmethod
-    async def upload_from_source(cls, config_path: str, downloaded_files: List[str], target_channels: List[str], delete_after_upload: bool = True) -> Dict[str, Any]:
+    async def upload_from_source(cls, config_path: str, downloaded_files: List[str], target_channels: List[str], 
+                                delete_after_upload: bool = True, channel_forward_status: Dict[str, bool] = None) -> Dict[str, Any]:
         """
         从已下载的文件直接上传到目标频道
         
@@ -1435,25 +1334,26 @@ class CustomMediaGroupSender:
             downloaded_files: 已下载的文件路径列表
             target_channels: 目标频道列表
             delete_after_upload: 上传后是否删除文件
+            channel_forward_status: 预检查的频道转发状态 {频道ID: 是否允许转发}
             
         Returns:
             Dict[str, Any]: 上传结果
         """
         # 读取API配置
-        config = configparser.ConfigParser()
-        config.read(config_path, encoding='utf-8')
+        config_parser = configparser.ConfigParser()
+        config_parser.read(config_path, encoding='utf-8')
         
-        api_id = config.getint('API', 'api_id')
-        api_hash = config.get('API', 'api_hash')
+        api_id = config_parser.getint('API', 'api_id')
+        api_hash = config_parser.get('API', 'api_hash')
         
         # 读取代理配置
         proxy = None
-        if config.getboolean('PROXY', 'enabled', fallback=False):
-            proxy_type = config.get('PROXY', 'proxy_type')
-            addr = config.get('PROXY', 'addr')
-            port = config.getint('PROXY', 'port')
-            username = config.get('PROXY', 'username', fallback=None) or None
-            password = config.get('PROXY', 'password', fallback=None) or None
+        if config_parser.has_section('PROXY') and config_parser.getboolean('PROXY', 'enabled', fallback=False):
+            proxy_type = config_parser.get('PROXY', 'proxy_type')
+            addr = config_parser.get('PROXY', 'addr')
+            port = config_parser.getint('PROXY', 'port')
+            username = config_parser.get('PROXY', 'username', fallback=None) or None
+            password = config_parser.get('PROXY', 'password', fallback=None) or None
             
             proxy = {
                 "scheme": proxy_type.lower(),
@@ -1463,7 +1363,31 @@ class CustomMediaGroupSender:
                 "password": password
             }
         
-        logger.info(f"准备从下载的文件上传到 {len(target_channels)} 个目标频道...")
+        # 过滤目标频道：移除无效的频道名和邀请链接
+        filtered_target_channels = []
+        for channel in target_channels:
+            # 去除@前缀便于判断
+            channel_name = channel[1:] if channel.startswith('@') else channel
+            
+            # 如果是私有频道邀请链接
+            if channel.startswith('https://t.me/+') or channel.startswith('https://t.me/joinchat/'):
+                # 私有频道链接保持原样
+                filtered_target_channels.append(channel)
+            # 如果是公开频道
+            elif not channel_name.startswith('+') and not '+' in channel_name:
+                filtered_target_channels.append(channel)
+            else:
+                logger.warning(f"频道名 {channel} 可能无效 (不符合Telegram命名规则)")
+                logger.warning(f"频道名 {channel} 无效（带有+号前缀），将被跳过")
+        
+        if len(filtered_target_channels) < len(target_channels):
+            logger.info(f"已过滤 {len(target_channels) - len(filtered_target_channels)} 个无效频道名")
+        
+        if not filtered_target_channels:
+            logger.error("没有有效的目标频道")
+            return {"success": False, "error": "没有有效的目标频道"}
+        
+        logger.info(f"准备从下载的文件上传到 {len(filtered_target_channels)} 个目标频道...")
         
         # 初始化Pyrogram客户端
         async with Client(
@@ -1472,11 +1396,12 @@ class CustomMediaGroupSender:
             api_hash=api_hash,
             proxy=proxy
         ) as client:
-            # 初始化自定义媒体发送器
+            # 创建自定义发送器实例
             sender = cls(
                 client=client, 
-                config_path=config_path,
-                target_channels=target_channels
+                config_parser=config_parser,
+                target_channels=filtered_target_channels,
+                channel_forward_status=channel_forward_status
             )
             
             if not downloaded_files:
@@ -1491,10 +1416,6 @@ class CustomMediaGroupSender:
             
             logger.info(f"准备上传 {len(existing_files)} 个文件")
             
-            # 将媒体文件分组，每组最多10个（Telegram媒体组限制）
-            batch_size = 10
-            media_groups = [existing_files[i:i+batch_size] for i in range(0, len(existing_files), batch_size)]
-            
             # 验证目标频道并更新有效频道列表
             valid_channels = await sender.validate_channels()
             if not valid_channels:
@@ -1507,8 +1428,8 @@ class CustomMediaGroupSender:
             # 记录开始时间
             start_time = time.time()
             
-            # 发送媒体
-            results = await sender.send_to_all_channels(media_groups)
+            # 使用优化后的send_to_all_channels方法
+            result = await sender.send_to_all_channels(existing_files)
             
             # 计算总耗时
             elapsed_time = time.time() - start_time
@@ -1527,12 +1448,10 @@ class CustomMediaGroupSender:
                 logger.info(f"已删除 {deleted_count}/{len(existing_files)} 个文件")
             
             # 统计成功和失败数
-            success_count = 0
-            for channel, success in results.items():
-                if success:
-                    success_count += 1
+            success_count = result.get("success", 0)
+            failed_count = result.get("fail", 0)
             
-            logger.info(f"上传完成，总共 {len(results)} 个频道，成功 {success_count} 个，失败 {len(results) - success_count} 个")
+            logger.info(f"上传完成，总共 {len(valid_channels)} 个频道，成功 {success_count} 个，失败 {failed_count} 个")
             logger.info(f"总耗时: {format_time(elapsed_time)}")
             
             return {
@@ -1540,10 +1459,292 @@ class CustomMediaGroupSender:
                 "uploaded_files": len(existing_files),
                 "target_channels": len(valid_channels),
                 "success_channels": success_count,
-                "failed_channels": len(results) - success_count,
+                "failed_channels": failed_count,
                 "elapsed_time": elapsed_time,
                 "deleted_files": deleted_count if delete_after_upload else 0
             }
+
+    async def first_upload_to_me(self, file_paths: List[str]) -> List[Any]:
+        """
+        将媒体文件首先上传到'me'(saved messages)获取file_id，然后返回准备好的媒体组件
+        
+        参数:
+            file_paths: 文件路径列表
+            
+        返回:
+            List[Any]: 准备好的媒体组件列表，可直接用于发送媒体组
+        """
+        if not file_paths:
+            logger.warning("❌ 没有提供任何文件路径")
+            return []
+            
+        # 计算总文件大小
+        total_size = sum(os.path.getsize(path) for path in file_paths if os.path.exists(path))
+        valid_paths = [path for path in file_paths if os.path.exists(path)]
+        
+        if not valid_paths:
+            logger.warning("❌ 所有文件路径都无效")
+            return []
+            
+        # 创建进度跟踪器
+        tracker = UploadProgressTracker(len(valid_paths), total_size)
+        
+        logger.info(f"🔄 正在上传 {len(valid_paths)} 个文件到'me'以获取file_id (总大小: {format_size(total_size)})")
+        
+        # 使用tqdm创建上传进度条
+        file_batch_desc = "上传到saved messages"
+        media_components = []
+        
+        # 上传并获取file_id
+        with tqdm(total=len(valid_paths), desc=file_batch_desc, unit="个", position=1, 
+                 bar_format=FILE_BAR_FORMAT,
+                 colour='blue') if TQDM_AVAILABLE else None as file_pbar:
+            for file_path in valid_paths:
+                file_name = os.path.basename(file_path)
+                mime_type = mimetypes.guess_type(file_path)[0] or ""
+                
+                # 上传文件并获取file_id
+                file_id = await self.upload_file_for_media_group(file_path, tracker)
+                
+                if not file_id:
+                    logger.error(f"❌ 上传文件失败: {file_name}")
+                    if file_pbar:
+                        file_pbar.update(1)
+                    continue
+                    
+                # 根据媒体类型创建不同的媒体组件
+                if mime_type.startswith('image/'):
+                    # 创建图片媒体组件
+                    media_components.append(InputMediaPhoto(
+                        media=file_id,
+                        caption=file_name
+                    ))
+                elif mime_type.startswith('video/'):
+                    # 创建视频媒体组件
+                    thumb_path = None
+                    if MOVIEPY_AVAILABLE:
+                        with silence_output():
+                            thumb_path = self.generate_thumbnail(file_path)
+                            
+                    media_components.append(InputMediaVideo(
+                        media=file_id,
+                        caption=file_name,
+                        thumb=thumb_path,
+                        supports_streaming=True
+                    ))
+                    
+                    # 清理缩略图
+                    if thumb_path and os.path.exists(thumb_path):
+                        try:
+                            os.unlink(thumb_path)
+                        except Exception as e:
+                            logger.warning(f"⚠️ 删除临时缩略图失败: {str(e)}")
+                else:
+                    # 创建文档媒体组件
+                    media_components.append(InputMediaDocument(
+                        media=file_id,
+                        caption=file_name
+                    ))
+                
+                # 更新进度条
+                if file_pbar:
+                    file_pbar.update(1)
+        
+        # 完成上传
+        tracker.complete_all()
+        if media_components:
+            logger.info(f"✅ 成功准备 {len(media_components)} 个媒体组件，使用file_id模式")
+        else:
+            logger.error("❌ 没有成功准备任何媒体组件")
+            
+        return media_components
+
+    async def upload_from_source(self, source_dir=None, filter_pattern=None, 
+                           batch_size=None, max_workers=None):
+        """
+        从源目录上传文件
+        
+        参数:
+            source_dir: 源目录
+            filter_pattern: 文件过滤模式
+            batch_size: 每批处理的文件数
+            max_workers: 并发工作线程数
+        
+        返回:
+            bool: 是否全部上传成功
+        """
+        start_time = time.time()
+        
+        # 使用参数值或默认配置
+        source_dir = source_dir or self.config.get("source_dir")
+        filter_pattern = filter_pattern or self.config.get("filter_pattern", "*")
+        batch_size = batch_size or self.config.get("batch_size", 10)
+        max_workers = max_workers or self.config.get("max_concurrent_batches", 1)
+        
+        # 检查源目录是否存在
+        if not os.path.exists(source_dir):
+            logger.error(f"❌ 源目录不存在: {source_dir}")
+            return False
+            
+        # 获取要上传的文件
+        all_files = self.get_files_to_upload(source_dir, filter_pattern)
+        if not all_files:
+            logger.warning(f"⚠️ 在目录 {source_dir} 中没有找到匹配的文件")
+            return True
+            
+        # 按批次分组文件
+        batches = self.group_files_by_batch(all_files, batch_size)
+        
+        logger.info(f"🚀 开始上传 {len(all_files)} 个文件 (分为 {len(batches)} 批次，最大并发: {max_workers})")
+        print("\n" + "="*60)
+        print(f"📂 源目录: {source_dir}")
+        print(f"🔍 过滤模式: {filter_pattern}")
+        print(f"📦 文件批次: {len(batches)} 批 (每批次 {batch_size} 个文件)")
+        print(f"⚙️ 并发上传: {max_workers} 个批次")
+        print(f"📡 目标频道: {len(self.target_channels)} 个频道")
+        print("="*60 + "\n")
+        
+        # 创建批次上传进度条
+        batch_desc = "上传批次"
+        
+        # 创建信号量控制并发
+        semaphore = asyncio.Semaphore(max_workers)
+        upload_tasks = []
+        
+        # 跟踪上传结果
+        total_success = 0
+        total_failures = 0
+        results_by_batch = []
+        
+        # 创建并发上传任务
+        async def process_batch(batch_index, files):
+            async with semaphore:
+                try:
+                    logger.info(f"开始处理批次 {batch_index+1}/{len(batches)} (包含 {len(files)} 个文件)")
+                    
+                    # 调用优化后的send_to_all_channels方法
+                    result = await self.send_to_all_channels(files)
+                    
+                    # 统计结果
+                    batch_success = result.get("success", 0)
+                    batch_failure = result.get("fail", 0)
+                    
+                    logger.info(f"批次 {batch_index+1} 完成，成功: {batch_success}, 失败: {batch_failure}")
+                    
+                    if batch_pbar:
+                        batch_pbar.update(1)
+                        
+                    return {
+                        "batch_index": batch_index,
+                        "success": batch_success,
+                        "fail": batch_failure,
+                        "files": files
+                    }
+                except Exception as e:
+                    logger.error(f"处理批次 {batch_index+1} 时出错: {str(e)}")
+                    if batch_pbar:
+                        batch_pbar.update(1)
+                    return {
+                        "batch_index": batch_index,
+                        "success": 0,
+                        "fail": len(self.target_channels),
+                        "files": files,
+                        "error": str(e)
+                    }
+                    
+        # 创建进度条和上传任务
+        with tqdm(total=len(batches), desc=batch_desc, unit="批",
+                position=0, bar_format=TOTAL_BAR_FORMAT,
+                colour='yellow') if TQDM_AVAILABLE else None as batch_pbar:
+            
+            # 创建所有上传任务
+            for i, batch_files in enumerate(batches):
+                task = asyncio.create_task(process_batch(i, batch_files))
+                upload_tasks.append(task)
+                
+            # 等待所有任务完成并收集结果
+            for future in asyncio.as_completed(upload_tasks):
+                result = await future
+                results_by_batch.append(result)
+                
+                # 累计成功和失败次数
+                total_success += result.get("success", 0)
+                total_failures += result.get("fail", 0)
+                
+        # 计算统计信息
+        elapsed_time = time.time() - start_time
+        total_channels = len(self.target_channels)
+        expected_uploads = len(batches) * total_channels
+        upload_rate = (total_success / expected_uploads) * 100 if expected_uploads > 0 else 0
+        
+        # 输出上传结果摘要
+        print("\n" + "="*60)
+        print(f"📊 上传统计")
+        print(f"⏱️ 总耗时: {elapsed_time:.2f} 秒")
+        print(f"📦 批次数: {len(batches)}")
+        print(f"📁 文件数: {len(all_files)}")
+        print(f"📡 频道数: {total_channels}")
+        print(f"✅ 成功: {total_success}/{expected_uploads} ({upload_rate:.1f}%)")
+        if total_failures > 0:
+            print(f"❌ 失败: {total_failures}")
+        print("="*60 + "\n")
+        
+        return total_failures == 0
+
+    def get_files_to_upload(self, source_dir: str, filter_pattern: str = "*") -> List[str]:
+        """
+        获取需要上传的文件列表
+        
+        参数:
+            source_dir: 源目录
+            filter_pattern: 文件过滤模式
+            
+        返回:
+            List[str]: 文件路径列表
+        """
+        import glob
+        
+        if not os.path.exists(source_dir):
+            logger.error(f"❌ 源目录不存在: {source_dir}")
+            return []
+            
+        # 获取符合条件的所有文件
+        file_pattern = os.path.join(source_dir, filter_pattern)
+        all_files = glob.glob(file_pattern)
+        
+        # 仅保留媒体文件
+        media_extensions = ('.jpg', '.jpeg', '.png', '.mp4', '.mov', '.avi', '.gif')
+        media_files = [f for f in all_files if os.path.isfile(f) and 
+                       os.path.splitext(f.lower())[1] in media_extensions]
+        
+        # 按文件名排序
+        media_files.sort()
+        
+        logger.info(f"🔍 在 {source_dir} 中找到 {len(media_files)} 个媒体文件")
+        return media_files
+        
+    def group_files_by_batch(self, files: List[str], batch_size: int) -> List[List[str]]:
+        """
+        将文件按批次分组
+        
+        参数:
+            files: 文件路径列表
+            batch_size: 每批文件数量
+            
+        返回:
+            List[List[str]]: 分组后的文件列表
+        """
+        if not files:
+            return []
+            
+        # 分批处理文件
+        batches = []
+        for i in range(0, len(files), batch_size):
+            batch = files[i:i+batch_size]
+            batches.append(batch)
+            
+        logger.info(f"📦 将 {len(files)} 个文件分为 {len(batches)} 个批次，每批 {batch_size} 个文件")
+        return batches
 
 async def main():
     """主函数"""
@@ -1638,7 +1839,7 @@ async def main():
         # 初始化自定义媒体发送器
         sender = CustomMediaGroupSender(
             client=client, 
-            config_path='config.ini',
+            config_parser=config,
             target_channels=target_channels,
             temp_folder=temp_folder
         )
@@ -1663,43 +1864,32 @@ async def main():
         # 更新发送器的目标频道为已验证的频道
         sender.target_channels = valid_channels
         
-        # 将媒体文件分组，每组最多10个（Telegram媒体组限制）
-        batch_size = 10
-        media_groups = [media_files[i:i+batch_size] for i in range(0, len(media_files), batch_size)]
-        
-        # 简化日志，只显示文件数和频道数信息
+        # 记录文件数和频道数信息
         logger.info(f"准备处理 {len(media_files)} 个文件 → {len(sender.target_channels)} 个频道")
         
         # 记录开始时间
         start_time = time.time()
         
-        # 发送媒体
-        results = await sender.send_to_all_channels(media_groups)
+        # 使用优化后的上传流程
+        result = await sender.send_to_all_channels(media_files)
         
         # 计算总耗时
         elapsed_time = time.time() - start_time
         
-        # 结果摘要表格 - 保留这部分以便用户查看详细结果
+        # 结果摘要表格
         print("\n" + "="*60)
         print(" "*20 + "📊 发送结果摘要")
         print("="*60)
-        print(f"{'频道':^30} | {'状态':^10} | {'耗时':^15}")
-        print("-"*60)
         
         # 统计成功和失败数
-        success_count = 0
-        for channel, success in results.items():
-            if success:
-                success_count += 1
-                
-            print(f"{channel:^30} | {'✅ 成功' if success else '❌ 失败':^25} | {format_time(elapsed_time):^25}")
+        success_count = result.get("success", 0)
+        failed_count = result.get("fail", 0)
         
-        print("-"*60)
-        print(f"总计: {len(results)} 个频道, {success_count} 成功, {len(results) - success_count} 失败")
+        print(f"总计: {len(valid_channels)} 个频道, {success_count} 成功, {failed_count} 失败")
         print(f"总耗时: {format_time(elapsed_time)}")
         print("="*60 + "\n")
         
-        # 美化输出的结束信息 - 保留以给用户明确的完成提示
+        # 美化输出的结束信息
         print("\n" + "="*60)
         print(" "*20 + "✅ 操作已完成")
         print(" "*15 + f"总用时: {format_time(elapsed_time)}")

@@ -7,6 +7,7 @@ from typing import Dict, Any, Optional, List, Union, Tuple
 import logging
 import sys
 import os
+import configparser
 
 from tg_forwarder.config import Config
 from tg_forwarder.client import TelegramClient
@@ -14,6 +15,8 @@ from tg_forwarder.channel_parser import ChannelParser
 from tg_forwarder.media_handler import MediaHandler
 from tg_forwarder.forwarder import MessageForwarder
 from tg_forwarder.utils.logger import setup_logger, get_logger
+from tg_forwarder.customUploader import CustomMediaGroupSender
+from tg_forwarder.client import Client
 
 # 获取日志记录器
 logger = get_logger("manager")
@@ -34,6 +37,8 @@ class ForwardManager:
         self.media_handler = None
         self.forwarder = None
         self.channel_parser = ChannelParser()
+        # 添加频道转发状态缓存
+        self.channel_forward_status = {}
     
     async def setup(self) -> None:
         """设置并初始化所有组件"""
@@ -70,6 +75,50 @@ class ForwardManager:
         
         logger.info("已关闭所有组件")
     
+    async def check_channel_forward_status(self, channels: List[Union[str, int]]) -> Dict[str, bool]:
+        """
+        检查频道是否禁止转发，并缓存结果
+        
+        Args:
+            channels: 频道ID或用户名列表
+            
+        Returns:
+            Dict[str, bool]: 频道转发状态字典，键为频道ID，值为是否允许转发(True表示允许)
+        """
+        results = {}
+        
+        for channel_id in channels:
+            if str(channel_id) in self.channel_forward_status:
+                # 使用缓存结果
+                results[str(channel_id)] = self.channel_forward_status[str(channel_id)]
+                continue
+                
+            try:
+                # 获取频道完整信息
+                chat_info = await self.client.get_entity(channel_id)
+                
+                # 检查是否设置了禁止转发
+                if hasattr(chat_info, 'has_protected_content') and chat_info.has_protected_content:
+                    # 禁止转发
+                    allow_forward = False
+                    logger.info(f"频道 {channel_id} 状态预检: ⚠️ 禁止转发 (has_protected_content=True)")
+                else:
+                    # 允许转发
+                    allow_forward = True
+                    logger.info(f"频道 {channel_id} 状态预检: ✓ 允许转发 (has_protected_content=False)")
+                
+                # 缓存结果
+                self.channel_forward_status[str(channel_id)] = allow_forward
+                results[str(channel_id)] = allow_forward
+                
+            except Exception as e:
+                logger.warning(f"获取频道 {channel_id} 的保护内容状态失败: {str(e)[:100]}")
+                # 默认为允许转发
+                results[str(channel_id)] = True
+                self.channel_forward_status[str(channel_id)] = True
+        
+        return results
+    
     async def run(self) -> Dict[str, Any]:
         """
         运行转发流程
@@ -104,6 +153,21 @@ class ForwardManager:
             if not target_identifiers:
                 logger.error("没有有效的目标频道")
                 return {"success": False, "error": "没有有效的目标频道"}
+            
+            # 预检查所有频道的转发状态
+            all_channels = [source_identifier] + target_identifiers
+            logger.info("开始预检查所有频道的转发状态...")
+            channel_status = await self.check_channel_forward_status(all_channels)
+            
+            # 根据预检查结果排序目标频道，优先使用允许转发的频道
+            logger.info("根据转发状态对目标频道进行排序...")
+            # 将禁止转发的频道移到列表末尾
+            target_identifiers.sort(key=lambda x: 0 if channel_status.get(str(x), True) else 1)
+            
+            # 记录排序后的频道状态
+            for channel in target_identifiers:
+                status = "允许转发" if channel_status.get(str(channel), True) else "禁止转发"
+                logger.info(f"目标频道 {channel} 状态: {status}")
             
             # 获取转发配置
             forward_config = self.config.get_forward_config()
@@ -150,13 +214,64 @@ class ForwardManager:
                             # 导入CustomMediaGroupSender
                             from tg_forwarder.customUploader import CustomMediaGroupSender
                             
-                            # 调用上传方法
-                            upload_result = await CustomMediaGroupSender.upload_from_source(
-                                config_path=self.config_path,
-                                downloaded_files=downloaded_files,
-                                target_channels=target_channels_str,
-                                delete_after_upload=True  # 上传后删除文件
+                            # 根据频道状态重新排序目标频道，优先使用可转发的频道
+                            sorted_target_channels = sorted(
+                                target_channels_str, 
+                                key=lambda x: 0 if self.channel_forward_status.get(str(x), True) else 1
                             )
+                            
+                            logger.info(f"已对上传目标频道进行排序，优先使用允许转发的频道")
+                            
+                            # 读取配置
+                            config_parser = configparser.ConfigParser()
+                            config_parser.read(self.config_path, encoding='utf-8')
+                            
+                            api_id = config_parser.getint('API', 'api_id')
+                            api_hash = config_parser.get('API', 'api_hash')
+                            
+                            # 获取正确的代理配置
+                            proxy = None
+                            if config_parser.has_section('PROXY') and config_parser.getboolean('PROXY', 'enabled', fallback=False):
+                                proxy_type = config_parser.get('PROXY', 'proxy_type')
+                                addr = config_parser.get('PROXY', 'addr')
+                                port = config_parser.getint('PROXY', 'port')
+                                username = config_parser.get('PROXY', 'username', fallback=None) or None
+                                password = config_parser.get('PROXY', 'password', fallback=None) or None
+                                
+                                proxy = {
+                                    "scheme": proxy_type.lower(),
+                                    "hostname": addr,
+                                    "port": port
+                                }
+                                
+                                if username:
+                                    proxy["username"] = username
+                                    
+                                if password:
+                                    proxy["password"] = password
+                            
+                            # 使用新的参数调用upload_from_source
+                            async with Client(
+                                "forwarder_upload_client",
+                                api_id=api_id,
+                                api_hash=api_hash,
+                                proxy=proxy
+                            ) as client:
+                                media_sender = CustomMediaGroupSender(
+                                    client=client,
+                                    config_parser=config_parser,
+                                    target_channels=sorted_target_channels,
+                                    temp_folder=download_config['temp_folder'],
+                                    channel_forward_status=self.channel_forward_status
+                                )
+                                
+                                # 使用对象实例方法而非类方法
+                                upload_result = await media_sender.upload_from_source(
+                                    source_dir=download_config['temp_folder'],
+                                    filter_pattern="*",
+                                    batch_size=10,
+                                    max_workers=2
+                                )
                             
                             # 合并上传结果到总结果
                             result["upload_results"] = upload_result
