@@ -472,12 +472,11 @@ class CustomMediaGroupSender:
         # 获取正确的客户端实例
         client_to_use = get_client_instance(self.client)
         
+        thumb_path = None
+        
         try:
             # 根据文件类型选择不同的上传方法
             if mime_type.startswith('image/'):
-                # 为视频生成缩略图
-                thumb_path = None
-                
                 message = await client_to_use.send_photo(
                     chat_id=chat_id,
                     photo=file_path,
@@ -489,12 +488,12 @@ class CustomMediaGroupSender:
                 
             elif mime_type.startswith('video/'):
                 # 为视频生成缩略图
-                thumb_path = None
-                if MOVIEPY_AVAILABLE:
-                    thumb_path = self.generate_thumbnail(file_path)
-                    if thumb_path:
-                        # 记录缩略图路径以便后续清理
-                        thumb_created = True
+                try:
+                    if MOVIEPY_AVAILABLE:
+                        thumb_path = self.generate_thumbnail(file_path)
+                except Exception as e:
+                    logger.warning(f"生成缩略图失败: {str(e)}")
+                    thumb_path = None
 
                 message = await client_to_use.send_video(
                     chat_id=chat_id,
@@ -507,13 +506,6 @@ class CustomMediaGroupSender:
                 )
                 file_id = message.video.file_id
                 
-                # 删除临时缩略图文件
-                if thumb_path and 'thumb_created' in locals() and thumb_created:
-                    try:
-                        os.unlink(thumb_path)
-                    except Exception as e:
-                        logger.warning(f"删除临时缩略图失败: {str(e)}")
-            
             else:
                 message = await client_to_use.send_document(
                     chat_id=chat_id,
@@ -537,6 +529,14 @@ class CustomMediaGroupSender:
                 error_msg = error_msg[:50] + "..."
             logger.error(f"上传文件 {file_name} 失败: {error_msg}")
             return None
+        finally:
+            # 清理缩略图文件
+            if thumb_path and os.path.exists(thumb_path):
+                try:
+                    os.unlink(thumb_path)
+                    logger.debug(f"已清理临时缩略图: {thumb_path}")
+                except Exception as e:
+                    logger.warning(f"清理临时缩略图失败: {str(e)}")
     
     def generate_thumbnail(self, video_path: str) -> Optional[str]:
         """
@@ -550,62 +550,72 @@ class CustomMediaGroupSender:
         """
         if not MOVIEPY_AVAILABLE:
             return None
-            
+        
+        thumb_path = None
+        video = None
+        
         try:
             # 创建一个临时文件用于保存缩略图
-            thumb_file = tempfile.NamedTemporaryFile(suffix='.jpg', delete=False)
-            thumb_path = thumb_file.name
-            thumb_file.close()
+            with tempfile.NamedTemporaryFile(suffix='.jpg', delete=False) as thumb_file:
+                thumb_path = thumb_file.name
             
             # 使用moviepy加载视频并截取帧作为缩略图
-            with VideoFileClip(video_path) as video:
-                # 获取视频时长的25%位置的帧
-                frame_time = video.duration * 0.25
-                
-                # 获取视频的第一帧
-                video_frame = video.get_frame(frame_time)
-                
-                # 创建临时图像并保存为JPEG
-                from PIL import Image
-                import numpy as np
-                image = Image.fromarray(np.uint8(video_frame))
-                
-                # 调整图像大小以适应Telegram缩略图要求(不超过320px)
-                width, height = image.size
-                max_size = 320
-                
-                if width > height:
-                    new_width = min(width, max_size)
-                    new_height = int(height * (new_width / width))
-                else:
-                    new_height = min(height, max_size)
-                    new_width = int(width * (new_height / height))
-                
-                image = image.resize((new_width, new_height), Image.LANCZOS)
-                
-                # 保存缩略图，质量设为90%以确保文件小于200KB
-                image.save(thumb_path, 'JPEG', quality=90, optimize=True)
-                
-                # 检查文件大小是否超过200KB，如果超过则压缩
-                if os.path.getsize(thumb_path) > 200 * 1024:
-                    # 递减质量直到文件小于200KB
-                    quality = 85
-                    while os.path.getsize(thumb_path) > 200 * 1024 and quality > 10:
-                        image.save(thumb_path, 'JPEG', quality=quality, optimize=True)
-                        quality -= 10
-                
-                logger.info(f"已生成视频缩略图: {os.path.basename(video_path)}")
-                return thumb_path
+            video = VideoFileClip(video_path)
+            
+            # 获取视频时长的25%位置的帧
+            frame_time = max(0.1, min(video.duration * 0.25, video.duration - 0.1))
+            
+            # 获取视频的帧
+            video_frame = video.get_frame(frame_time)
+            
+            # 创建临时图像并保存为JPEG
+            from PIL import Image
+            import numpy as np
+            image = Image.fromarray(np.uint8(video_frame))
+            
+            # 调整图像大小以适应Telegram缩略图要求(不超过320px)
+            width, height = image.size
+            max_size = 320
+            
+            if width > height:
+                new_width = min(width, max_size)
+                new_height = int(height * (new_width / width))
+            else:
+                new_height = min(height, max_size)
+                new_width = int(width * (new_height / height))
+            
+            image = image.resize((new_width, new_height), Image.LANCZOS)
+            
+            # 保存缩略图，质量设为90%以确保文件小于200KB
+            image.save(thumb_path, 'JPEG', quality=90, optimize=True)
+            
+            # 检查文件大小是否超过200KB，如果超过则压缩
+            if os.path.getsize(thumb_path) > 200 * 1024:
+                # 递减质量直到文件小于200KB
+                quality = 85
+                while os.path.getsize(thumb_path) > 200 * 1024 and quality > 10:
+                    image.save(thumb_path, 'JPEG', quality=quality, optimize=True)
+                    quality -= 10
+            
+            logger.info(f"已生成视频缩略图: {os.path.basename(video_path)}")
+            return thumb_path
                 
         except Exception as e:
             logger.warning(f"生成视频缩略图失败: {str(e)}")
             # 如果生成失败但临时文件已创建，则删除它
-            if 'thumb_path' in locals() and os.path.exists(thumb_path):
+            if thumb_path and os.path.exists(thumb_path):
                 try:
                     os.unlink(thumb_path)
-                except:
-                    pass
+                except Exception as e:
+                    logger.warning(f"删除临时缩略图文件失败: {str(e)}")
             return None
+        finally:
+            # 确保VideoFileClip对象被正确关闭
+            if video is not None:
+                try:
+                    video.close()
+                except Exception as e:
+                    logger.warning(f"关闭VideoFileClip对象失败: {str(e)}")
     
     async def send_media_group_with_progress(self, chat_id: str, file_paths: List[str]) -> Tuple[bool, List[Message]]:
         """
@@ -1319,12 +1329,17 @@ class CustomMediaGroupSender:
                         caption=file_name
                     ))
                 elif mime_type.startswith('video/'):
-                    # 创建视频媒体组件
+                    # 为视频生成缩略图并上传
                     thumb_path = None
-                    if MOVIEPY_AVAILABLE:
-                        with silence_output():
+                    try:
+                        if MOVIEPY_AVAILABLE:
+                            # 避免使用with silence_output上下文，改为直接调用
                             thumb_path = self.generate_thumbnail(file_path)
-                            
+                    except Exception as e:
+                        logger.warning(f"⚠️ 生成缩略图失败: {str(e)}")
+                        thumb_path = None
+                    
+                    # 将视频添加到媒体组件
                     media_components.append(InputMediaVideo(
                         media=file_id,
                         caption=file_name,
@@ -1332,7 +1347,7 @@ class CustomMediaGroupSender:
                         supports_streaming=True
                     ))
                     
-                    # 清理缩略图
+                    # 清理缩略图文件
                     if thumb_path and os.path.exists(thumb_path):
                         try:
                             os.unlink(thumb_path)
