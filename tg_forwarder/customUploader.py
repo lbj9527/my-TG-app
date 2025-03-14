@@ -1560,7 +1560,7 @@ class CustomMediaGroupSender:
         return media_components
 
     async def upload_from_source(self, source_dir=None, filter_pattern=None, 
-                           batch_size=None, max_workers=None):
+                           batch_size=None, max_workers=None, delete_after_upload=True):
         """
         从源目录上传文件
         
@@ -1569,6 +1569,7 @@ class CustomMediaGroupSender:
             filter_pattern: 文件过滤模式
             batch_size: 每批处理的文件数
             max_workers: 并发工作线程数
+            delete_after_upload: 上传成功后是否删除本地文件
         
         返回:
             bool: 是否全部上传成功
@@ -1602,6 +1603,7 @@ class CustomMediaGroupSender:
         print(f"📦 文件批次: {len(batches)} 批 (每批次 {batch_size} 个文件)")
         print(f"⚙️ 并发上传: {max_workers} 个批次")
         print(f"📡 目标频道: {len(self.target_channels)} 个频道")
+        print(f"🗑️ 上传后删除文件: {'是' if delete_after_upload else '否'}")
         print("="*60 + "\n")
         
         # 创建批次上传进度条
@@ -1677,6 +1679,28 @@ class CustomMediaGroupSender:
         expected_uploads = len(batches) * total_channels
         upload_rate = (total_success / expected_uploads) * 100 if expected_uploads > 0 else 0
         
+        # 上传完成后，如果成功率高并且需要删除文件
+        is_success = total_failures == 0
+        deleted_files = 0
+        
+        if delete_after_upload and is_success:
+            logger.info("🗑️ 上传成功，开始删除本地文件...")
+            
+            for batch_result in results_by_batch:
+                batch_files = batch_result.get("files", [])
+                for file_path in batch_files:
+                    try:
+                        if os.path.exists(file_path):
+                            os.remove(file_path)
+                            deleted_files += 1
+                            logger.debug(f"已删除文件: {os.path.basename(file_path)}")
+                    except Exception as e:
+                        logger.error(f"删除文件失败: {file_path}, 错误: {str(e)}")
+            
+            logger.info(f"✅ 已成功删除 {deleted_files}/{len(all_files)} 个本地文件")
+        elif delete_after_upload:
+            logger.warning("⚠️ 由于上传过程中存在失败，本地文件未被删除")
+        
         # 输出上传结果摘要
         print("\n" + "="*60)
         print(f"📊 上传统计")
@@ -1687,9 +1711,11 @@ class CustomMediaGroupSender:
         print(f"✅ 成功: {total_success}/{expected_uploads} ({upload_rate:.1f}%)")
         if total_failures > 0:
             print(f"❌ 失败: {total_failures}")
+        if delete_after_upload:
+            print(f"🗑️ 删除文件: {deleted_files}/{len(all_files)}")
         print("="*60 + "\n")
         
-        return total_failures == 0
+        return is_success
 
     def get_files_to_upload(self, source_dir: str, filter_pattern: str = "*") -> List[str]:
         """

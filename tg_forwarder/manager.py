@@ -270,7 +270,8 @@ class ForwardManager:
                                     source_dir=download_config['temp_folder'],
                                     filter_pattern="*",
                                     batch_size=10,
-                                    max_workers=2
+                                    max_workers=2,
+                                    delete_after_upload=True
                                 )
                             
                             # 合并上传结果到总结果
