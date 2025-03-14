@@ -914,6 +914,25 @@ class CustomMediaGroupSender:
         if not messages:
             logger.warning("没有提供要转发的消息")
             return False, []
+        
+        # 首先检查源频道是否禁止转发
+        try:
+            source_chat = await self.client.get_chat(from_chat_id)
+            if hasattr(source_chat, 'has_protected_content') and source_chat.has_protected_content:
+                logger.warning(f"源频道 {from_chat_id} 禁止转发消息 (has_protected_content=True)，无法转发")
+                return False, []
+        except Exception as e:
+            # 如果获取频道信息失败，记录日志但继续尝试
+            logger.warning(f"检查源频道 {from_chat_id} 保护内容状态失败: {str(e)[:100]}")
+        
+        # 检查目标频道状态
+        try:
+            target_chat = await self.client.get_chat(to_chat_id)
+            if hasattr(target_chat, 'has_protected_content') and target_chat.has_protected_content:
+                logger.info(f"目标频道 {to_chat_id} 设置了内容保护 (has_protected_content=True)，这不影响转发到该频道")
+        except Exception as e:
+            # 如果获取频道信息失败，记录日志但继续尝试
+            logger.warning(f"检查目标频道 {to_chat_id} 状态失败: {str(e)[:100]}")
             
         try:
             # 分批转发（每批最多10个消息）
@@ -1133,24 +1152,38 @@ class CustomMediaGroupSender:
                     # 首先验证第一个频道是否可以转发
                     can_forward = True
                     try:
-                        # 尝试向自己转发一条消息，测试是否可以转发
-                        # 简化日志，不输出频道测试信息
-                        test_forward = await self.client.forward_messages(
-                            chat_id="me",
-                            from_chat_id=first_channel,
-                            message_ids=[sent_messages[0].id]
-                        )
-                        # 测试完成后删除测试消息
-                        if test_forward:
-                            await test_forward[0].delete()
-                            # 简化日志，不输出频道测试成功信息
-                    except Exception as e:
-                        if "CHAT_FORWARDS_RESTRICTED" in str(e):
+                        # 获取频道完整信息，检查has_protected_content属性
+                        chat_info = await self.client.get_chat(first_channel)
+                        
+                        # 通过has_protected_content属性判断是否禁止转发
+                        if chat_info.has_protected_content:
                             can_forward = False
-                            logger.warning(f"频道限制: {first_channel} 禁止转发，将寻找其他可转发频道")
+                            logger.warning(f"频道限制: {first_channel} 禁止转发 (has_protected_content=True)，将寻找其他可转发频道")
                         else:
-                            # 简化日志，不输出测试失败的详细信息
-                            pass
+                            # 记录日志但不输出详细信息，简化代码
+                            logger.info(f"频道 {first_channel} 允许转发 (has_protected_content=False) ✓")
+                    except Exception as e:
+                        # 如果获取频道信息失败，回退到原方法：尝试向自己转发一条消息测试
+                        logger.warning(f"获取频道 {first_channel} 的保护内容状态失败: {str(e)[:100]}")
+                        logger.warning("回退到测试转发方式判断频道状态")
+                        
+                        try:
+                            # 尝试向自己转发一条消息，测试是否可以转发
+                            test_forward = await self.client.forward_messages(
+                                chat_id="me",
+                                from_chat_id=first_channel,
+                                message_ids=[sent_messages[0].id]
+                            )
+                            # 测试完成后删除测试消息
+                            if test_forward:
+                                await test_forward[0].delete()
+                        except Exception as forward_err:
+                            if "CHAT_FORWARDS_RESTRICTED" in str(forward_err):
+                                can_forward = False
+                                logger.warning(f"频道限制: {first_channel} 禁止转发，将寻找其他可转发频道")
+                            else:
+                                # 其他错误可能是权限问题等
+                                logger.warning(f"测试转发时出错: {str(forward_err)[:100]}")
                     
                     # 如果第一个频道可以转发，直接从它转发到其他频道
                     source_channel = first_channel
@@ -1172,23 +1205,43 @@ class CustomMediaGroupSender:
                                 
                             # 测试是否可以转发
                             try:
-                                test_forward = await self.client.forward_messages(
-                                    chat_id="me",
-                                    from_chat_id=test_channel,
-                                    message_ids=[test_messages[0].id]
-                                )
-                                # 可以转发，使用这个频道作为源
-                                if test_forward:
-                                    await test_forward[0].delete()
+                                # 获取频道完整信息，检查has_protected_content属性
+                                chat_info = await self.client.get_chat(test_channel)
+                                
+                                # 检查是否允许转发
+                                if not chat_info.has_protected_content:
+                                    # 允许转发，使用这个频道作为源
                                     source_channel = test_channel
                                     source_messages = test_messages
                                     found_unrestricted = True
                                     results[test_channel] = True
-                                    logger.info(f"频道 {test_channel} 允许转发 ✓ - 将作为转发源")
+                                    logger.info(f"频道 {test_channel} 允许转发 (has_protected_content=False) ✓ - 将作为转发源")
                                     break
+                                else:
+                                    logger.warning(f"频道 {test_channel} 禁止转发 (has_protected_content=True)")
                             except Exception as e:
-                                # 简化日志，不输出详细错误信息
-                                continue
+                                # 如果获取频道信息失败，回退到原方法：尝试向自己转发消息测试
+                                logger.warning(f"获取频道 {test_channel} 的保护内容状态失败: {str(e)[:100]}")
+                                
+                                # 回退到测试转发方式
+                                try:
+                                    test_forward = await self.client.forward_messages(
+                                        chat_id="me",
+                                        from_chat_id=test_channel,
+                                        message_ids=[test_messages[0].id]
+                                    )
+                                    # 可以转发，使用这个频道作为源
+                                    if test_forward:
+                                        await test_forward[0].delete()
+                                        source_channel = test_channel
+                                        source_messages = test_messages
+                                        found_unrestricted = True
+                                        results[test_channel] = True
+                                        logger.info(f"频道 {test_channel} 允许转发 ✓ - 将作为转发源")
+                                        break
+                                except Exception as forward_err:
+                                    # 转发失败，继续检查下一个频道
+                                    continue
                                 
                         if not found_unrestricted:
                             logger.warning("所有频道均禁止转发，将使用复制替代转发")
@@ -1268,7 +1321,7 @@ class CustomMediaGroupSender:
 
     async def validate_channels(self) -> List[str]:
         """
-        验证目标频道是否存在
+        验证目标频道是否存在，同时检查哪些频道禁止转发
         
         返回:
             List[str]: 有效的频道列表
@@ -1279,6 +1332,7 @@ class CustomMediaGroupSender:
             
         valid_channels = []
         invalid_channels = []
+        protected_channels = []  # 受保护的频道（禁止转发）
         
         # 验证每个频道
         for channel in self.target_channels:
@@ -1286,7 +1340,13 @@ class CustomMediaGroupSender:
                 # 尝试获取频道信息
                 chat = await self.client.get_chat(channel)
                 valid_channels.append(channel)
-                logger.info(f"✅ 频道验证成功: {channel} ({chat.title})")
+                
+                # 检查是否禁止转发
+                if hasattr(chat, 'has_protected_content') and chat.has_protected_content:
+                    protected_channels.append(channel)
+                    logger.info(f"✅ 频道验证成功: {channel} ({chat.title}) - ⚠️ 禁止转发 (has_protected_content=True)")
+                else:
+                    logger.info(f"✅ 频道验证成功: {channel} ({chat.title}) - 允许转发 (has_protected_content=False)")
             except Exception as e:
                 error_msg = str(e)
                 if "USERNAME_NOT_OCCUPIED" in error_msg:
@@ -1304,6 +1364,18 @@ class CustomMediaGroupSender:
             print(f"⚠️ 警告: {len(invalid_channels)}/{len(self.target_channels)} 个频道验证失败")
             print("💡 这些无效频道将被自动跳过")
             print("="*60 + "\n")
+            
+        # 输出禁止转发的频道
+        if protected_channels:
+            logger.warning(f"⚠️ 发现 {len(protected_channels)} 个禁止转发的频道: {', '.join(protected_channels)}")
+            print("\n" + "="*60)
+            print(f"⚠️ 注意: {len(protected_channels)}/{len(valid_channels)} 个有效频道禁止转发")
+            print("💡 这些频道可以上传文件，但不能用作转发源")
+            print("="*60 + "\n")
+            
+            # 如果第一个频道禁止转发，输出更明确的提示
+            if protected_channels and self.target_channels[0] in protected_channels:
+                logger.warning("⚠️ 第一个目标频道禁止转发，系统将尝试查找其他可转发的频道作为源")
             
         return valid_channels
 

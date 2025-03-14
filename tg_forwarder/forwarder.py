@@ -82,6 +82,18 @@ class MessageForwarder:
         results = defaultdict(list)
         forwards_restricted = False
         
+        # 首先检查源频道是否设置了保护内容（禁止转发）
+        try:
+            source_chat = await self.client.get_entity(source_message.chat.id)
+            if hasattr(source_chat, 'has_protected_content') and source_chat.has_protected_content:
+                logger.warning(f"频道 {source_message.chat.id} 禁止转发消息 (has_protected_content=True)，将使用备用方式")
+                forwards_restricted = True
+                results["forwards_restricted"] = True
+                return results
+        except Exception as e:
+            # 如果获取频道信息失败，继续尝试转发（将在转发时捕获错误）
+            logger.warning(f"检查频道 {source_message.chat.id} 保护内容状态失败: {str(e)[:100]}")
+            
         for target_id in target_channels:
             logger.info(f"正在转发消息 {source_message.id} 到目标频道 (ID: {target_id})")
             
@@ -146,6 +158,18 @@ class MessageForwarder:
                 if msg.caption and self.has_emoji(msg.caption):
                     logger.info(f"跳过包含Emoji的媒体组消息: {msg.id} (媒体组ID: {msg.media_group_id})")
                     return results
+
+        # 首先检查源频道是否设置了保护内容（禁止转发）
+        try:
+            source_chat = await self.client.get_entity(media_group[0].chat.id)
+            if hasattr(source_chat, 'has_protected_content') and source_chat.has_protected_content:
+                logger.warning(f"频道 {media_group[0].chat.id} 禁止转发消息 (has_protected_content=True)，将使用备用方式")
+                forwards_restricted = True
+                results["forwards_restricted"] = True
+                return results
+        except Exception as e:
+            # 如果获取频道信息失败，继续尝试转发（将在转发时捕获错误）
+            logger.warning(f"检查频道 {media_group[0].chat.id} 保护内容状态失败: {str(e)[:100]}")
 
         for target_id in target_channels:
             logger.info(f"正在转发媒体组 {media_group[0].media_group_id} 到目标频道 (ID: {target_id})")
