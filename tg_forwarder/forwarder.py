@@ -452,14 +452,19 @@ class MessageForwarder:
         # 计算总耗时
         stats["end_time"] = time.time()
         stats["duration"] = stats["end_time"] - stats["start_time"]
-        stats["success"] = True
+        
+        # 设置成功标志和成功消息数量
+        # 使用success_count记录成功转发的消息数量
+        success_count = stats["success"]
+        # 设置success标志表示操作是否成功完成（不是消息数量）
+        stats["success_flag"] = True
         
         # 添加转发消息列表到结果中
         stats["forwarded_messages"] = dict(forwarded_messages)
         # 添加源消息列表到结果中
         stats["source_messages"] = source_messages
         
-        logger.info(f"消息处理完成: 总数 {stats['total']}, 处理 {stats['processed']}, 成功 {stats['success']}, 失败 {stats['failed']}, 跳过 {stats['skipped']}")
+        logger.info(f"消息处理完成: 总数 {stats['total']}, 处理 {stats['processed']}, 成功 {success_count}, 失败 {stats['failed']}, 跳过 {stats['skipped']}")
         if stats["skipped_emoji"] > 0:
             logger.info(f"跳过的Emoji消息数: {stats['skipped_emoji']}")
         if stats["failed"] > 0:

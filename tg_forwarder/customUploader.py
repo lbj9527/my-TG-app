@@ -1406,13 +1406,13 @@ class CustomMediaGroupSender:
         # 检查源目录是否存在
         if not os.path.exists(source_dir):
             logger.error(f"❌ 源目录不存在: {source_dir}")
-            return {"success": False, "error": f"源目录不存在: {source_dir}"}
+            return {"success_flag": False, "error": f"源目录不存在: {source_dir}"}
             
         # 获取要上传的文件
         all_files = self.get_files_to_upload(source_dir, filter_pattern)
         if not all_files:
             logger.warning(f"⚠️ 在目录 {source_dir} 中没有找到匹配的文件")
-            return {"success": True, "message": "没有找到匹配的文件", "uploaded_files": 0}
+            return {"success_flag": True, "message": "没有找到匹配的文件", "uploaded_files": 0}
             
         # 按批次分组文件
         batches = self.group_files_by_batch(all_files, batch_size)
@@ -1537,7 +1537,8 @@ class CustomMediaGroupSender:
         print("="*60 + "\n")
         
         return {
-            "success": is_success,
+            "success_flag": is_success,
+            "success": total_success,  # 保留数值型的success，表示成功的消息数量
             "uploaded_files": len(all_files),
             "target_channels": total_channels,
             "success_channels": len(self.target_channels) - total_failures // len(batches) if len(batches) > 0 else 0,

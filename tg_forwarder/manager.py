@@ -138,7 +138,7 @@ class ForwardManager:
                 logger.info(f"源频道: {self.channel_parser.format_channel_identifier(source_identifier)}")
             except Exception as e:
                 logger.error(f"解析源频道失败: {str(e)}")
-                return {"success": False, "error": f"解析源频道失败: {str(e)}"}
+                return {"success_flag": False, "error": f"解析源频道失败: {str(e)}"}
             
             # 解析目标频道
             target_identifiers = []
@@ -152,7 +152,7 @@ class ForwardManager:
             
             if not target_identifiers:
                 logger.error("没有有效的目标频道")
-                return {"success": False, "error": "没有有效的目标频道"}
+                return {"success_flag": False, "error": "没有有效的目标频道"}
             
             # 预检查所有频道的转发状态
             all_channels = [source_identifier] + target_identifiers
@@ -269,8 +269,11 @@ class ForwardManager:
                             # 合并上传结果到总结果
                             result["upload_results"] = upload_result
                             
-                            if upload_result.get("success", False):
+                            if upload_result.get("success_flag", False):
                                 logger.info(f"备用上传成功: {upload_result.get('uploaded_files', 0)} 个文件上传到 {upload_result.get('success_channels', 0)} 个频道")
+                                # 更新统计信息，将上传的文件数设为成功数
+                                result["success"] = upload_result.get("uploaded_files", 0)
+                                result["failed"] = 0  # 既然备用上传成功，失败数应为0
                             else:
                                 logger.error(f"备用上传失败: {upload_result.get('error', '未知错误')}")
                         else:
@@ -323,7 +326,7 @@ class ForwardManager:
             logger.error(f"转发过程中发生错误: {str(e)}")
             import traceback
             logger.error(traceback.format_exc())
-            return {"success": False, "error": str(e)}
+            return {"success_flag": False, "error": str(e)}
     
     @classmethod
     async def run_from_config(cls, config_path: str = "config.ini") -> Dict[str, Any]:

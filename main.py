@@ -76,13 +76,16 @@ async def main():
             # 运行转发流程
             result = await manager.run()
             
-            if result.get("success", False):
-                logger.info("转发任务成功完成")
-                logger.info(f"统计信息: 总数 {result.get('total', 0)}, 处理 {result.get('processed', 0)}, 成功 {result.get('success', 0)}, 失败 {result.get('failed', 0)}")
-                return 0
+            # 输出统计信息
+            logger.info(f"统计信息: 总数 {result.get('total', 0)}, 处理 {result.get('processed', 0)}, 成功 {result.get('success', 0)}, 失败 {result.get('failed', 0)}")
+            
+            # 根据操作是否成功输出最终结果
+            if result.get('success_flag', False):
+                logger.info("转发任务执行成功")
             else:
-                logger.error(f"转发任务失败: {result.get('error', '未知错误')}")
-                return 1
+                logger.error("转发任务执行失败")
+            
+            return 0
         
         finally:
             # 关闭管理器
