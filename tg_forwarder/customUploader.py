@@ -689,22 +689,7 @@ class CustomMediaGroupSender:
                         image.save(thumb_path, 'JPEG', quality=quality, optimize=True)
                         quality -= 10
                 
-                # 在项目根目录创建pic文件夹(如果不存在)
-                pic_folder = os.path.join(os.getcwd(), "pic")
-                os.makedirs(pic_folder, exist_ok=True)
-                
-                # 为缩略图创建一个唯一的文件名（使用视频文件名和时间戳）
-                video_filename = os.path.basename(video_path)
-                video_name = os.path.splitext(video_filename)[0]
-                timestamp = int(time.time())
-                pic_filename = f"{video_name}_{timestamp}.jpg"
-                pic_path = os.path.join(pic_folder, pic_filename)
-                
-                # 复制缩略图到pic文件夹
-                image.save(pic_path, 'JPEG', quality=90, optimize=True)
-                
                 logger.info(f"已生成视频缩略图: {os.path.basename(video_path)}")
-                logger.info(f"缩略图已保存到: {pic_path}")
                 return thumb_path
                 
         except Exception as e:
