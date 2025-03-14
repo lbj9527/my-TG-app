@@ -10,8 +10,11 @@ import mimetypes
 import re
 import sys
 import tempfile
+import io
+from contextlib import redirect_stdout, redirect_stderr
 from typing import List, Dict, Tuple, Any, Optional, Callable
 from datetime import datetime
+import argparse
 
 from pyrogram import Client
 from pyrogram.types import InputMediaPhoto, InputMediaVideo, InputMediaDocument, Message
@@ -45,9 +48,74 @@ WAIT_BAR_FORMAT = '{desc}: {remaining}s'
 # 重定向错误输出，隐藏Pyrogram的详细错误信息
 class ErrorFilter(logging.Filter):
     def filter(self, record):
-        # 过滤掉Peer id invalid和Task exception was never retrieved相关的错误
-        if "Peer id invalid" in str(record.msg) or "Task exception was never retrieved" in str(record.msg):
-            return False
+        # 过滤掉常见的非关键性日志
+        if isinstance(record.msg, str):
+            msg_lower = record.msg.lower()
+            
+            # 过滤常见错误
+            if ("peer id invalid" in msg_lower or 
+                "task exception was never retrieved" in msg_lower):
+                return False
+                
+            # 过滤媒体处理的非错误日志
+            if record.levelno < logging.WARNING:
+                if ("开始为视频生成缩略图" in record.msg or
+                    "缩略图已存在" in record.msg or
+                    "成功使用ffmpeg" in msg_lower or
+                    "尝试使用moviepy" in msg_lower or
+                    "生成视频缩略图" in msg_lower or
+                    "使用缩略图" in record.msg or
+                    "文件下载完成" in record.msg or
+                    "开始下载" in record.msg and not "失败" in record.msg or
+                    "上传图片" in record.msg or
+                    "上传文档" in record.msg or
+                    "开始上传视频" in record.msg or
+                    "视频作为文档上传成功" in record.msg or
+                    "视频上传成功" in record.msg):
+                    return False
+        
+        return True
+
+# 过滤媒体处理的非关键输出
+class MediaFilter(logging.Filter):
+    """过滤掉FFmpeg、MoviePy等媒体处理的详细输出"""
+    
+    def filter(self, record):
+        if not isinstance(record.msg, str):
+            return True
+            
+        msg_lower = str(record.msg).lower()
+        
+        # 只过滤非警告/错误日志
+        if record.levelno < logging.WARNING:
+            # 过滤媒体工具输出
+            media_patterns = [
+                'ffmpeg', 'avcodec', 'libav', 'moviepy', 'imageio',
+                'duration=', 'video:', 'audio:', 'stream mapping',
+                'frame=', 'fps=', 'bitrate=', 'time=', 'size=',
+                'converting', 'processed', 'image sequence',
+                '开始处理文件', '处理批次', '媒体上传', '视频转码'
+            ]
+            
+            # 过滤进度相关输出
+            progress_patterns = [
+                '进度:', '进度条', '总进度', '文件进度', 
+                '处理进度', '下载进度', '上传进度',
+                '正在上传', '正在下载', '正在处理'
+            ]
+            
+            # 过滤文件操作详情
+            file_patterns = [
+                '生成缩略图', '成功下载', '开始下载', '文件已存在',
+                '文件大小', '上传文件', '统计信息', '文件下载完成'
+            ]
+            
+            # 检查是否包含任何需要过滤的模式
+            for pattern_list in [media_patterns, progress_patterns, file_patterns]:
+                for pattern in pattern_list:
+                    if pattern in msg_lower and '失败' not in msg_lower and '错误' not in msg_lower:
+                        return False
+        
         return True
 
 # 替换彩色日志格式为简单格式，并添加日志过滤功能
@@ -65,58 +133,31 @@ class SimpleFormatter(logging.Formatter):
             "成功转发", "媒体组发送完成", "频道转发", 
             "允许转发", "禁止转发", "USERNAME_NOT_OCCUPIED",
             "CHAT_FORWARDS_RESTRICTED", "频道名", "频道ID",
-            "转发失败", "解析错误"
+            "验证成功", "验证失败", "有效频道", "无效频道",
+            "上传完成", "转发消息", "转发失败", "发送失败",
+            "下载完成", "上传媒体", "上传视频"
         ]
         
-        # 检查是否要过滤的消息类型
-        filter_keywords = [
-            "频道测试", "文件组", "找到", "上传新文件", 
-            "准备上传", "处理频道", "媒体发送器初始化", 
-            "目标频道", "临时文件夹", "开始并行转发",
-            "准备向频道", "批次"
-        ]
+        # 如果是警告或错误，始终显示
+        if record.levelno >= logging.WARNING:
+            pass  # 不做过滤，保留所有警告和错误日志
+        else:
+            # 对于INFO级别日志，过滤掉非关键信息
+            has_keyword = any(keyword in message for keyword in keywords)
+            if not has_keyword:
+                # 对非关键INFO日志，简化显示
+                if len(message) > 60:
+                    message = message[:57] + "..."
         
-        # 检查是否是关键日志
-        is_key_log = False
-        for keyword in keywords:
-            if keyword in message:
-                is_key_log = True
-                break
+        # 删除ANSI颜色代码
+        import re
+        ansi_escape = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
+        message = ansi_escape.sub('', message)
         
-        # 如果不是关键日志，检查是否应该过滤
-        if not is_key_log:
-            for filter_keyword in filter_keywords:
-                if filter_keyword in message:
-                    return ""  # 返回空字符串而非None
+        # 创建最终日志消息
+        formatted_message = f"{message}"
         
-        # 处理要保留的日志格式
-        if levelname == "INFO":
-            if "文件完成" in message:
-                record.msg = f"✅ {message}"
-            elif "全部完成" in message:
-                record.msg = f"🎉 {message}"
-            elif "成功转发" in message:
-                record.msg = f"✅ {message}"
-            elif "媒体组发送完成" in message:
-                record.msg = f"✅ {message}"
-            elif "允许转发" in message:
-                record.msg = f"✅ {message}"
-            elif "转发" in message and "成功" in message:
-                record.msg = f"✅ {message}"
-        elif levelname == "WARNING":
-            if "禁止转发" in message or "频道名" in message or "可能无效" in message:
-                record.msg = f"⚠️ {message}"
-            else:
-                return ""  # 返回空字符串而非None
-        elif levelname == "ERROR":
-            if "转发失败" in message or "发送失败" in message or "USERNAME_NOT_OCCUPIED" in message:
-                record.msg = f"❌ {message}"
-            else:
-                return ""  # 返回空字符串而非None
-                
-        # 返回格式化后的日志，确保总是返回字符串
-        formatted = super().format(record)
-        return formatted
+        return formatted_message
 
 # 设置日志记录
 # 在创建日志之前，先重置根日志配置
@@ -137,6 +178,11 @@ for handler in logger.handlers[:]:
 handler = logging.StreamHandler()
 handler.setFormatter(SimpleFormatter('%(asctime)s - %(levelname)s - %(message)s'))
 logger.addHandler(handler)
+
+# 添加媒体过滤器，减少非关键输出
+media_filter = MediaFilter()
+logger.addFilter(media_filter)
+logging.getLogger().addFilter(media_filter)  # 添加到根日志记录器
 
 # 设置 pyrogram 的日志级别为 ERROR，减少连接和错误信息输出
 logging.getLogger("pyrogram").setLevel(logging.ERROR)
@@ -1685,3 +1731,49 @@ if __name__ == "__main__":
             print("💡 使用 --debug 参数运行可查看详细错误信息")
     finally:
         print("\n👋 程序已退出") 
+
+# 修改黑洞输出函数，完全屏蔽FFmpeg和MoviePy的输出
+def silence_output():
+    """创建一个上下文管理器来完全屏蔽标准输出和错误输出，特别适用于媒体处理工具"""
+    import os
+    import sys
+    import io
+    from contextlib import redirect_stdout, redirect_stderr
+    
+    # 创建黑洞文件对象
+    null_io = io.StringIO()
+    
+    # 设置FFmpeg环境变量来静默输出
+    old_ffmpeg_loglevel = os.environ.get("FFMPEG_LOGLEVEL", "")
+    old_ffmpeg_silent = os.environ.get("FFMPEG_SILENT", "")
+    old_imageio_ffmpeg = os.environ.get("IMAGEIO_FFMPEG_EXE", "")
+    
+    os.environ["FFMPEG_LOGLEVEL"] = "quiet"
+    os.environ["FFMPEG_SILENT"] = "true"
+    os.environ["IMAGEIO_FFMPEG_EXE"] = "ffmpeg"  # 确保使用系统FFmpeg
+    
+    # 创建重定向器
+    stdout_redirect = redirect_stdout(null_io)
+    stderr_redirect = redirect_stderr(null_io)
+    
+    class SilenceManager:
+        def __enter__(self):
+            # 进入上下文时应用重定向
+            self.stdout_ctx = stdout_redirect.__enter__()
+            self.stderr_ctx = stderr_redirect.__enter__()
+            return self
+            
+        def __exit__(self, exc_type, exc_val, exc_tb):
+            # 退出上下文时恢复原始输出
+            self.stderr_ctx.__exit__(exc_type, exc_val, exc_tb)
+            self.stdout_ctx.__exit__(exc_type, exc_val, exc_tb)
+            
+            # 恢复环境变量
+            if old_ffmpeg_loglevel:
+                os.environ["FFMPEG_LOGLEVEL"] = old_ffmpeg_loglevel
+            if old_ffmpeg_silent:
+                os.environ["FFMPEG_SILENT"] = old_ffmpeg_silent
+            if old_imageio_ffmpeg:
+                os.environ["IMAGEIO_FFMPEG_EXE"] = old_imageio_ffmpeg
+    
+    return SilenceManager() 
