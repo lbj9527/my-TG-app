@@ -443,7 +443,7 @@ class CustomMediaGroupSender:
         """进度回调函数"""
         tracker.update_progress(current, total)
     
-    async def upload_file_for_media_group(self, file_path: str, tracker: Optional[UploadProgressTracker] = None) -> Optional[str]:
+    async def upload_file_for_media_group(self, file_path: str, tracker: Optional[UploadProgressTracker] = None) -> Tuple[Optional[str], Optional[Message]]:
         """
         上传单个文件，用于媒体组发送
         
@@ -452,11 +452,11 @@ class CustomMediaGroupSender:
             tracker: 上传进度跟踪器
             
         返回:
-            Optional[str]: 上传成功的文件ID或None
+            Tuple[Optional[str], Optional[Message]]: (上传成功的文件ID, 消息对象) 或 (None, None)
         """
         if not os.path.exists(file_path):
             logger.error(f"文件不存在: {file_path}")
-            return None
+            return None, None
             
         file_name = os.path.basename(file_path)
         file_size = os.path.getsize(file_path)
@@ -520,7 +520,7 @@ class CustomMediaGroupSender:
             if tracker:
                 tracker.complete_file()
                 
-            return file_id
+            return file_id, message
             
         except Exception as e:
             # 简化错误信息
@@ -528,7 +528,7 @@ class CustomMediaGroupSender:
             if len(error_msg) > 50:
                 error_msg = error_msg[:50] + "..."
             logger.error(f"上传文件 {file_name} 失败: {error_msg}")
-            return None
+            return None, None
         finally:
             # 清理缩略图文件
             if thumb_path and os.path.exists(thumb_path):
@@ -656,7 +656,7 @@ class CustomMediaGroupSender:
                 mime_type = mimetypes.guess_type(file_path)[0] or ""
                 
                 # 上传文件
-                file_id = await self.upload_file_for_media_group(file_path, tracker)
+                file_id, message = await self.upload_file_for_media_group(file_path, tracker)
                 
                 if not file_id:
                     if TQDM_AVAILABLE and file_pbar:
@@ -1315,6 +1315,9 @@ class CustomMediaGroupSender:
         file_batch_desc = "上传到saved messages"
         media_components = []
         
+        # 保存上传到me的消息ID，用于后续删除
+        me_messages = []
+        
         # 上传并获取file_id
         with tqdm(total=len(valid_paths), desc=file_batch_desc, unit="个", position=1, 
                  bar_format=FILE_BAR_FORMAT,
@@ -1323,14 +1326,18 @@ class CustomMediaGroupSender:
                 file_name = os.path.basename(file_path)
                 mime_type = mimetypes.guess_type(file_path)[0] or ""
                 
-                # 上传文件并获取file_id
-                file_id = await self.upload_file_for_media_group(file_path, tracker)
+                # 上传文件并获取file_id和消息对象
+                file_id, message = await self.upload_file_for_media_group(file_path, tracker)
                 
                 if not file_id:
                     logger.error(f"❌ 上传文件失败: {file_name}")
                     if file_pbar:
                         file_pbar.update(1)
                     continue
+                
+                # 添加消息ID到列表，用于后续删除
+                if message:
+                    me_messages.append(message)
                     
                 # 根据媒体类型创建不同的媒体组件
                 if mime_type.startswith('image/'):
@@ -1377,6 +1384,18 @@ class CustomMediaGroupSender:
         
         # 完成上传
         tracker.complete_all()
+        
+        # 删除上传到me的消息
+        if me_messages:
+            logger.info(f"🗑️ 正在删除上传到'me'的 {len(me_messages)} 条临时消息...")
+            client_to_use = get_client_instance(self.client)
+            try:
+                # 使用delete_messages批量删除消息
+                await client_to_use.delete_messages("me", [msg.id for msg in me_messages])
+                logger.info(f"✅ 已成功删除上传到'me'的 {len(me_messages)} 条临时消息")
+            except Exception as e:
+                logger.warning(f"⚠️ 删除'me'中的临时消息时出错: {str(e)}")
+        
         if media_components:
             logger.info(f"✅ 成功准备 {len(media_components)} 个媒体组件，使用file_id模式")
         else:
@@ -1511,27 +1530,31 @@ class CustomMediaGroupSender:
         expected_uploads = len(batches) * total_channels
         upload_rate = (total_success / expected_uploads) * 100 if expected_uploads > 0 else 0
         
-        # 上传完成后，如果成功率高并且需要删除文件
-        is_success = total_failures == 0
+        # 上传完成后，如果需要删除文件（即使部分失败也删除）
         deleted_files = 0
         
-        if delete_after_upload and is_success:
-            logger.info("🗑️ 上传成功，开始删除本地文件...")
-            
-            for batch_result in results_by_batch:
-                batch_files = batch_result.get("files", [])
-                for file_path in batch_files:
-                    try:
-                        if os.path.exists(file_path):
-                            os.remove(file_path)
-                            deleted_files += 1
-                            logger.debug(f"已删除文件: {os.path.basename(file_path)}")
-                    except Exception as e:
-                        logger.error(f"删除文件失败: {file_path}, 错误: {str(e)}")
-            
-            logger.info(f"✅ 已成功删除 {deleted_files}/{len(all_files)} 个本地文件")
-        elif delete_after_upload:
-            logger.warning("⚠️ 由于上传过程中存在失败，本地文件未被删除")
+        # 定义成功标志 - 只要有一个上传成功就算成功
+        is_success = total_success > 0
+        
+        if delete_after_upload:
+            # 不再判断是否全部成功，只要完成上传就删除文件
+            if total_success > 0:
+                logger.info("🗑️ 正在删除本地文件...")
+                
+                for batch_result in results_by_batch:
+                    batch_files = batch_result.get("files", [])
+                    for file_path in batch_files:
+                        try:
+                            if os.path.exists(file_path):
+                                os.remove(file_path)
+                                deleted_files += 1
+                                logger.debug(f"已删除文件: {os.path.basename(file_path)}")
+                        except Exception as e:
+                            logger.error(f"删除文件失败: {file_path}, 错误: {str(e)}")
+                
+                logger.info(f"✅ 已成功删除 {deleted_files}/{len(all_files)} 个本地文件")
+            else:
+                logger.warning("⚠️ 上传完全失败，本地文件未被删除")
         
         # 输出上传结果摘要
         print("\n" + "="*60)
