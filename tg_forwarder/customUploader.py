@@ -377,6 +377,9 @@ class CustomMediaGroupSender:
         # 保存频道转发状态缓存
         self.channel_forward_status = channel_forward_status or {}
         
+        # 初始化频道验证器
+        self.channel_validator = ChannelValidator(client)
+        
         # 添加缺失的属性默认值
         self.hide_author = False
         self.max_concurrent_batches = 3
@@ -409,9 +412,6 @@ class CustomMediaGroupSender:
         
         # 创建并发信号量
         self.semaphore = asyncio.Semaphore(self.max_concurrent_uploads)
-        
-        # 创建频道验证器
-        self.channel_validator = ChannelValidator(client)
         
         # 初始化日志
         logger.info(f"媒体发送器初始化完成: 目标频道数 {len(self.target_channels)}")
@@ -964,7 +964,7 @@ class CustomMediaGroupSender:
             logger.error(f"转发过程发生错误: {str(e)[:50]}...")
             return False, []
     
-    async def send_to_all_channels(self, file_paths: List[str]) -> Dict[str, Any]:
+    async def send_to_all_channels(self, file_paths: List[str], preserve_format: bool = False, metadata_files: List[str] = None, parallel_channels: int = None) -> Dict[str, Any]:
         """
         按照优化流程发送媒体文件到所有目标频道:
         1. 先上传到me获取file_id
@@ -973,6 +973,9 @@ class CustomMediaGroupSender:
         
         参数:
             file_paths: 媒体文件路径列表
+            preserve_format: 是否保持原始消息格式
+            metadata_files: 元数据文件路径列表
+            parallel_channels: 并行处理的频道数量
             
         返回:
             Dict: 包含成功/失败统计和每个频道的消息列表
@@ -984,10 +987,18 @@ class CustomMediaGroupSender:
             "messages_by_channel": {}  # 每个频道的消息列表
         }
         
-        # 确保 channel_forward_status 是字典
-        if self.channel_forward_status is None:
-            self.channel_forward_status = {}
-            
+        # 如果未指定并行处理的频道数量，则从配置中读取
+        if parallel_channels is None:
+            if isinstance(self.config_parser, configparser.ConfigParser):
+                if self.config_parser.has_section('UPLOAD'):
+                    parallel_channels = self.config_parser.getint('UPLOAD', 'parallel_uploads', fallback=3)
+                else:
+                    parallel_channels = 3
+            else:
+                parallel_channels = 3  # 默认值
+        
+        logger.info(f"并行上传频道数量设置为: {parallel_channels}")
+        
         # 验证有效频道
         valid_channels, _, forward_status = await self.channel_validator.validate_channels(self.target_channels)
         # 更新频道转发状态缓存
@@ -1601,6 +1612,142 @@ class CustomMediaGroupSender:
             
         logger.info(f"📦 将 {len(files)} 个文件分为 {len(batches)} 个批次，每批 {batch_size} 个文件")
         return batches
+
+    async def prepare_media_with_original_format(self, file_paths: List[str], metadata_dict: Dict[str, Any]) -> List[Any]:
+        """
+        根据原始消息格式准备媒体组件
+        
+        参数:
+            file_paths: 媒体文件路径列表
+            metadata_dict: 消息元数据字典 {消息ID: 元数据}
+            
+        返回:
+            List: 媒体组件列表
+        """
+        from pyrogram.types import (
+            InputMediaPhoto, 
+            InputMediaVideo, 
+            InputMediaAudio,
+            InputMediaDocument,
+            MessageEntity
+        )
+        
+        media_components = []
+        
+        # 记录消息ID到文件路径的映射
+        msg_id_to_file = {}
+        for file_path in file_paths:
+            filename = os.path.basename(file_path)
+            # 从文件名中提取消息ID
+            parts = filename.split("_")
+            if len(parts) >= 2 and parts[1].isdigit():
+                msg_id = parts[1]
+                msg_id_to_file[msg_id] = file_path
+                
+        logger.info(f"📄 正在准备 {len(file_paths)} 个文件的媒体组件，保持原始格式")
+        
+        # 处理每个文件
+        for msg_id, file_path in msg_id_to_file.items():
+            # 查找对应的元数据
+            metadata = metadata_dict.get(msg_id)
+            
+            if not metadata:
+                logger.warning(f"⚠️ 未找到消息 {msg_id} 的元数据，将使用默认格式")
+                # 使用默认上传方式，直接获取file_id
+                file_id = await self.upload_file_for_media_group(file_path)
+                if file_id:
+                    # 根据文件扩展名判断类型
+                    ext = os.path.splitext(file_path)[1].lower()
+                    if ext in ('.jpg', '.jpeg', '.png', '.webp'):
+                        media_components.append(InputMediaPhoto(media=file_id))
+                    elif ext in ('.mp4', '.mov', '.avi'):
+                        media_components.append(InputMediaVideo(media=file_id))
+                    else:
+                        media_components.append(InputMediaDocument(media=file_id))
+                continue
+                
+            # 上传文件获取file_id
+            file_id = await self.upload_file_for_media_group(file_path)
+            if not file_id:
+                continue
+                
+            # 获取消息文本和实体
+            caption = metadata.get("text", "")
+            entities_data = metadata.get("entities", [])
+            
+            # 将元数据中的实体转换为MessageEntity对象
+            entities = []
+            for entity_data in entities_data:
+                try:
+                    entity_type = entity_data.get("type")
+                    if not entity_type:
+                        continue
+                        
+                    entity = MessageEntity(
+                        type=entity_type,
+                        offset=entity_data.get("offset", 0),
+                        length=entity_data.get("length", 0)
+                    )
+                    
+                    # 设置可选属性
+                    if "url" in entity_data and entity_data["url"]:
+                        entity.url = entity_data["url"]
+                        
+                    if "user" in entity_data and entity_data["user"]:
+                        # user属性需要特殊处理，这里简化处理
+                        pass
+                        
+                    entities.append(entity)
+                except Exception as e:
+                    logger.warning(f"⚠️ 解析消息实体失败: {str(e)}")
+            
+            # 根据媒体类型创建媒体组件
+            media_type = metadata.get("media_type")
+            
+            try:
+                if media_type == "photo":
+                    media_components.append(InputMediaPhoto(
+                        media=file_id,
+                        caption=caption,
+                        caption_entities=entities
+                    ))
+                elif media_type == "video":
+                    # 为视频生成缩略图
+                    thumbnail = None
+                    if os.path.exists(file_path):
+                        thumbnail_path = self.generate_thumbnail(file_path)
+                        if thumbnail_path:
+                            thumbnail = thumbnail_path
+                            
+                    media_components.append(InputMediaVideo(
+                        media=file_id,
+                        caption=caption,
+                        caption_entities=entities,
+                        thumbnail=thumbnail,
+                        supports_streaming=True
+                    ))
+                elif media_type == "audio":
+                    media_components.append(InputMediaAudio(
+                        media=file_id,
+                        caption=caption,
+                        caption_entities=entities
+                    ))
+                else:
+                    # 默认作为文档处理
+                    media_components.append(InputMediaDocument(
+                        media=file_id,
+                        caption=caption,
+                        caption_entities=entities
+                    ))
+                    
+                logger.info(f"✅ 成功准备消息 {msg_id} 的媒体组件，使用原始格式")
+            except Exception as e:
+                logger.error(f"❌ 准备媒体组件时出错: {str(e)}")
+                # 使用默认文档格式作为备选
+                media_components.append(InputMediaDocument(media=file_id))
+                
+        logger.info(f"✅ 已成功准备 {len(media_components)}/{len(file_paths)} 个媒体组件")
+        return media_components
 
 async def main():
     """主函数"""

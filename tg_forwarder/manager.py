@@ -11,12 +11,13 @@ import configparser
 
 from tg_forwarder.config import Config
 from tg_forwarder.client import TelegramClient
-from tg_forwarder.channel_parser import ChannelParser
+from tg_forwarder.channel_parser import ChannelParser, ChannelValidator
 from tg_forwarder.media_handler import MediaHandler
 from tg_forwarder.forwarder import MessageForwarder
 from tg_forwarder.utils.logger import setup_logger, get_logger
 from tg_forwarder.customUploader import CustomMediaGroupSender
 from tg_forwarder.client import Client
+from tg_forwarder.downloader import MediaDownloader
 
 # 获取日志记录器
 logger = get_logger("manager")
@@ -31,42 +32,46 @@ class ForwardManager:
         Args:
             config_path: 配置文件路径
         """
-        self.config = Config(config_path)
         self.config_path = config_path
+        self.config = Config(config_path)
         self.client = None
-        self.media_handler = None
         self.forwarder = None
-        self.channel_parser = ChannelParser()
-        # 添加频道转发状态缓存
+        self.media_handler = None
+        self.downloader = None
+        self.channel_validator = None
         self.channel_forward_status = {}
     
     async def setup(self) -> None:
-        """设置并初始化所有组件"""
-        # 设置日志
-        log_config = self.config.get_log_config()
-        setup_logger(log_config)
-        
-        # 创建并连接客户端
-        api_config = self.config.get_api_config()
-        proxy_config = self.config.get_proxy_config()
-        
-        self.client = TelegramClient(api_config, proxy_config)
-        await self.client.connect()
-        
-        # 获取媒体处理配置
-        media_config = self.config.get_media_config()
-        self.media_handler = MediaHandler(self.client, media_config)
-        
-        # 初始化下载器
-        from tg_forwarder.downloader import MediaDownloader
-        download_config = self.config.get_download_config()
-        self.downloader = MediaDownloader(self.client, download_config)
-        
-        # 创建转发器
-        forward_config = self.config.get_forward_config()
-        self.forwarder = MessageForwarder(self.client, forward_config, self.media_handler)
-        
-        logger.info("所有组件初始化完成")
+        """初始化组件"""
+        try:
+            # 创建Pyrogram客户端
+            self.client = TelegramClient(
+                api_config=self.config.get_api_config(),
+                proxy_config=self.config.get_proxy_config()
+            )
+            
+            # 连接到Telegram
+            await self.client.connect()
+            
+            # 创建频道验证器
+            self.channel_validator = ChannelValidator(self.client)
+            
+            # 创建媒体下载器
+            download_config = self.config.get_download_config()
+            self.downloader = MediaDownloader(self.client, download_config)
+            
+            # 创建媒体处理器
+            media_config = self.config.get_media_config()
+            self.media_handler = MediaHandler(self.client, media_config)
+            
+            # 创建消息转发器
+            forward_config = self.config.get_forward_config()
+            self.forwarder = MessageForwarder(self.client, forward_config, self.media_handler)
+            
+            logger.info("所有组件初始化完成")
+        except Exception as e:
+            logger.error(f"初始化组件时出错: {str(e)}")
+            raise
     
     async def shutdown(self) -> None:
         """关闭所有组件并释放资源"""
@@ -134,25 +139,25 @@ class ForwardManager:
             
             # 解析源频道
             try:
-                source_identifier, _ = self.channel_parser.parse_channel(source_channel_str)
-                logger.info(f"源频道: {self.channel_parser.format_channel_identifier(source_identifier)}")
+                source_identifier, _ = ChannelParser.parse_channel(source_channel_str)
+                logger.info(f"源频道: {ChannelParser.format_channel_identifier(source_identifier)}")
             except Exception as e:
                 logger.error(f"解析源频道失败: {str(e)}")
-                return {"success_flag": False, "error": f"解析源频道失败: {str(e)}"}
+                return {"success": False, "error": f"解析源频道失败: {str(e)}"}
             
             # 解析目标频道
             target_identifiers = []
             for target_str in target_channels_str:
                 try:
-                    target_identifier, _ = self.channel_parser.parse_channel(target_str)
+                    target_identifier, _ = ChannelParser.parse_channel(target_str)
                     target_identifiers.append(target_identifier)
-                    logger.info(f"目标频道: {self.channel_parser.format_channel_identifier(target_identifier)}")
+                    logger.info(f"目标频道: {ChannelParser.format_channel_identifier(target_identifier)}")
                 except Exception as e:
                     logger.warning(f"解析目标频道 '{target_str}' 失败: {str(e)}")
             
             if not target_identifiers:
                 logger.error("没有有效的目标频道")
-                return {"success_flag": False, "error": "没有有效的目标频道"}
+                return {"success": False, "error": "没有有效的目标频道"}
             
             # 预检查所有频道的转发状态
             all_channels = [source_identifier] + target_identifiers
@@ -189,8 +194,26 @@ class ForwardManager:
             if result.get("forwards_restricted", False):
                 logger.warning("检测到源频道禁止转发消息，将使用备用方式: 下载文件后上传")
                 try:
+                    # 读取配置文件以获取并行设置
+                    config_parser = configparser.ConfigParser()
+                    config_parser.read(self.config_path, encoding='utf-8')
+                    
+                    # 获取并行下载数量
+                    parallel_downloads = 1
+                    if config_parser.has_section('DOWNLOAD'):
+                        parallel_downloads = config_parser.getint('DOWNLOAD', 'parallel_downloads', fallback=5)
+                    logger.info(f"并行下载数量设置为: {parallel_downloads}")
+                    
+                    # 获取并行上传数量
+                    parallel_uploads = 1
+                    max_workers = 1
+                    if config_parser.has_section('UPLOAD'):
+                        parallel_uploads = config_parser.getint('UPLOAD', 'parallel_uploads', fallback=3)
+                        max_workers = config_parser.getint('UPLOAD', 'max_workers', fallback=2)
+                    logger.info(f"并行上传数量设置为: {parallel_uploads}, 最大工作线程: {max_workers}")
+                    
                     # 下载源频道消息到本地
-                    logger.info(f"开始下载源频道消息...")
+                    logger.info(f"开始并行下载源频道消息...")
                     
                     # 从源频道直接下载指定范围内的消息
                     download_results = await self.downloader.download_messages_from_source(
@@ -252,6 +275,7 @@ class ForwardManager:
                             ) as client:
                                 media_sender = CustomMediaGroupSender(
                                     client=client,
+                                    config_parser=config_parser,  # 使用已读取的配置
                                     target_channels=sorted_target_channels,
                                     temp_folder=download_config['temp_folder'],
                                     channel_forward_status=self.channel_forward_status
@@ -262,17 +286,34 @@ class ForwardManager:
                                     source_dir=download_config['temp_folder'],
                                     filter_pattern="*",
                                     batch_size=10,
-                                    max_workers=2,
+                                    max_workers=max_workers,  # 使用配置的工作线程数
                                     delete_after_upload=True
                                 )
+                                
+                                # 如果需要直接上传，修改send_to_all_channels方法的参数
+                                media_sender.config["parallel_uploads"] = parallel_uploads
                             
                             # 合并上传结果到总结果
                             result["upload_results"] = upload_result
                             
-                            if upload_result.get("success_flag", False):
-                                logger.info(f"备用上传成功: {upload_result.get('uploaded_files', 0)} 个文件上传到 {upload_result.get('success_channels', 0)} 个频道")
+                            if upload_result.get("success", False) or upload_result.get("success_flag", False) or upload_result:
+                                # 如果能找到文件上传数或成功频道数，就认为上传成功
+                                uploaded_files = upload_result.get("uploaded_files", 0)
+                                if not uploaded_files:
+                                    # 尝试从success字段计算上传文件数
+                                    success_count = upload_result.get("success", 0)
+                                    # 尝试获取总批次或消息数
+                                    total_batches = len(upload_result.get("messages_by_channel", {}))
+                                    uploaded_files = success_count or total_batches or 0
+                                
+                                success_channels = upload_result.get("success_channels", 0)
+                                if not success_channels:
+                                    # 尝试从success字段获取成功频道数
+                                    success_channels = upload_result.get("success", 0)
+                                
+                                logger.info(f"备用上传成功: {uploaded_files} 个文件上传到 {success_channels} 个频道")
                                 # 更新统计信息，将上传的文件数设为成功数
-                                result["success"] = upload_result.get("uploaded_files", 0)
+                                result["success"] = uploaded_files
                                 result["failed"] = 0  # 既然备用上传成功，失败数应为0
                             else:
                                 logger.error(f"备用上传失败: {upload_result.get('error', '未知错误')}")
