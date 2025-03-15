@@ -475,59 +475,73 @@ class CustomMediaGroupSender:
         # 创建用于接收消息的聊天ID
         chat_id = "me"  # 使用自己的账号作为中转
         
-        # 获取正确的客户端实例
-        client_to_use = get_client_instance(self.client)
+        # 获取客户端实例
+        client_to_use = self.client
         
         thumb_path = None
         
         try:
             # 根据文件类型选择不同的上传方法
-            if mime_type.startswith('image/'):
-                message = await client_to_use.send_photo(
-                    chat_id=chat_id,
-                    photo=file_path,
-                    caption=f"[temp] {file_name}",
-                    progress=self.progress_callback if tracker else None,
-                    progress_args=(tracker,) if tracker else None
-                )
-                file_id = message.photo.file_id
-                
-            elif mime_type.startswith('video/'):
-                # 为视频生成缩略图
-                try:
-                    if MOVIEPY_AVAILABLE:
-                        thumb_path = self.generate_thumbnail(file_path)
-                except Exception as e:
-                    logger.warning(f"生成缩略图失败: {str(e)}")
-                    thumb_path = None
+            try:
+                if mime_type.startswith('image/'):
+                    logger.info(f"正在上传图片: {file_name}")
+                    message = await client_to_use.send_photo(
+                        chat_id=chat_id,
+                        photo=file_path,
+                        caption=f"[temp] {file_name}",
+                        progress=self.progress_callback if tracker else None,
+                        progress_args=(tracker,) if tracker else None
+                    )
+                    file_id = message.photo.file_id
+                    
+                elif mime_type.startswith('video/'):
+                    # 为视频生成缩略图
+                    try:
+                        if MOVIEPY_AVAILABLE:
+                            thumb_path = self.generate_thumbnail(file_path)
+                    except Exception as e:
+                        logger.warning(f"生成缩略图失败: {str(e)}")
+                        thumb_path = None
 
-                message = await client_to_use.send_video(
-                    chat_id=chat_id,
-                    video=file_path,
-                    caption=f"[temp] {file_name}",
-                    thumb=thumb_path,  # 添加缩略图参数
-                    supports_streaming=True,  # 启用流媒体支持
-                    progress=self.progress_callback if tracker else None,
-                    progress_args=(tracker,) if tracker else None
-                )
-                file_id = message.video.file_id
-            
-            else:
-                message = await client_to_use.send_document(
-                    chat_id=chat_id,
-                    document=file_path,
-                    caption=f"[temp] {file_name}",
-                    progress=self.progress_callback if tracker else None,
-                    progress_args=(tracker,) if tracker else None
-                )
-                file_id = message.document.file_id
-            
-            # 完成进度跟踪
-            if tracker:
-                tracker.complete_file()
+                    logger.info(f"正在上传视频: {file_name}")
+                    message = await client_to_use.send_video(
+                        chat_id=chat_id,
+                        video=file_path,
+                        caption=f"[temp] {file_name}",
+                        thumb=thumb_path,  # 添加缩略图参数
+                        supports_streaming=True,  # 启用流媒体支持
+                        progress=self.progress_callback if tracker else None,
+                        progress_args=(tracker,) if tracker else None
+                    )
+                    file_id = message.video.file_id
                 
-            return file_id, message
-            
+                else:
+                    logger.info(f"正在上传文档: {file_name}")
+                    message = await client_to_use.send_document(
+                        chat_id=chat_id,
+                        document=file_path,
+                        caption=f"[temp] {file_name}",
+                        progress=self.progress_callback if tracker else None,
+                        progress_args=(tracker,) if tracker else None
+                    )
+                    file_id = message.document.file_id
+                
+                # 完成进度跟踪
+                if tracker:
+                    tracker.complete_file()
+                
+                logger.info(f"成功上传文件 {file_name}，获取到file_id")
+                return file_id, message
+                
+            except AttributeError as e:
+                if "is_premium" in str(e):
+                    logger.warning(f"客户端实例缺少premium属性，尝试使用替代方法上传: {str(e)}")
+                    # 告知用户但不引发错误，上传继续
+                    return None, None
+                else:
+                    # 其他属性错误
+                    logger.error(f"上传文件 {file_name} 时出现属性错误: {str(e)}")
+                    return None, None
         except Exception as e:
             # 简化错误信息
             error_msg = str(e)
@@ -716,8 +730,8 @@ class CustomMediaGroupSender:
             # 创建媒体组发送批次
             batch_desc = f"发送媒体组"
             
-            # 获取实际的客户端实例
-            client_to_use = get_client_instance(self.client)
+            # 使用当前客户端实例
+            client_to_use = self.client
             
             # 发送媒体组
             media_batch_chunks = [media_list[i:i+10] for i in range(0, len(media_list), 10)]
@@ -1676,10 +1690,9 @@ class CustomMediaGroupSender:
         # 删除上传到me的消息
         if me_messages:
             logger.info(f"🗑️ 正在删除上传到'me'的 {len(me_messages)} 条临时消息...")
-            client_to_use = get_client_instance(self.client)
             try:
                 # 使用delete_messages批量删除消息
-                await client_to_use.delete_messages("me", [msg.id for msg in me_messages])
+                await self.client.delete_messages("me", [msg.id for msg in me_messages])
                 logger.info(f"✅ 已成功删除上传到'me'的 {len(me_messages)} 条临时消息")
             except Exception as e:
                 logger.warning(f"⚠️ 删除'me'中的临时消息时出错: {str(e)}")
