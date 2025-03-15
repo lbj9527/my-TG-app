@@ -8,6 +8,7 @@ import logging
 import sys
 import os
 import configparser
+import time
 
 from tg_forwarder.config import Config
 from tg_forwarder.client import TelegramClient
@@ -164,12 +165,16 @@ class ForwardManager:
             logger.info("开始预检查所有频道的转发状态...")
             channel_status = await self.check_channel_forward_status(all_channels)
             
+            # 检查源频道是否允许转发
+            source_allow_forward = channel_status.get(str(source_identifier), True)
+            
             # 根据预检查结果排序目标频道，优先使用允许转发的频道
             logger.info("根据转发状态对目标频道进行排序...")
             # 将禁止转发的频道移到列表末尾
             target_identifiers.sort(key=lambda x: 0 if channel_status.get(str(x), True) else 1)
             
             # 记录排序后的频道状态
+            logger.info(f"源频道 {source_identifier} 状态: {'允许转发' if source_allow_forward else '禁止转发'}")
             for channel in target_identifiers:
                 status = "允许转发" if channel_status.get(str(channel), True) else "禁止转发"
                 logger.info(f"目标频道 {channel} 状态: {status}")
@@ -179,21 +184,69 @@ class ForwardManager:
             start_message_id = forward_config['start_message_id']
             end_message_id = forward_config['end_message_id']
             
-            # 执行消息处理和转发
-            result = await self.forwarder.process_messages(
-                source_identifier,
-                target_identifiers,
-                start_message_id,
-                end_message_id
-            )
-            
             # 获取下载配置
             download_config = self.config.get_download_config()
             
-            # 检查源频道是否禁止转发
-            if result.get("forwards_restricted", False):
-                logger.warning("检测到源频道禁止转发消息，将使用备用方式: 下载文件后上传")
+            # 根据源频道转发状态选择处理方式
+            if source_allow_forward:
+                # 源频道允许转发，使用正常转发流程
+                logger.info("源频道允许转发，使用正常转发流程...")
+                result = await self.forwarder.process_messages(
+                    source_identifier,
+                    target_identifiers,
+                    start_message_id,
+                    end_message_id
+                )
+                
+                # 处理普通转发中的错误（非禁止转发导致的失败）
+                if result.get("failed", 0) > 0 and "failed_messages" in result:
+                    failed_count = result.get("failed", 0)
+                    failed_message_ids = result["failed_messages"]
+                    logger.warning(f"检测到 {failed_count} 条消息转发失败，将直接跳过这些消息")
+                    
+                    # 仅记录失败的消息ID，不下载
+                    if failed_message_ids:
+                        logger.info(f"转发失败的消息ID: {', '.join(map(str, failed_message_ids[:10]))}" + 
+                                   (f"... 等共 {len(failed_message_ids)} 条" if len(failed_message_ids) > 10 else ""))
+                    
+                    # 显示详细错误信息
+                    if "error_messages" in result and result["error_messages"]:
+                        error_messages = result["error_messages"]
+                        # 如果错误消息很多，只显示前几条和统计信息
+                        if len(error_messages) > 5:
+                            logger.warning(f"转发失败的主要错误信息 (共 {len(error_messages)} 条):")
+                            for i, msg in enumerate(error_messages[:5], 1):
+                                logger.warning(f"  {i}. {msg}")
+                            logger.warning(f"  ... 以及其他 {len(error_messages) - 5} 条错误")
+                        else:
+                            logger.warning("转发失败的错误信息:")
+                            for i, msg in enumerate(error_messages, 1):
+                                logger.warning(f"  {i}. {msg}")
+                    
+                    # 记录总体转发结果
+                    total_messages = result.get("total", 0)
+                    success_count = result.get("success", 0)
+                    success_percentage = (success_count / total_messages * 100) if total_messages > 0 else 0
+                    
+                    logger.info(f"转发总结: 总计 {total_messages} 条消息，成功 {success_count} 条 ({success_percentage:.1f}%)，"
+                               f"失败 {failed_count} 条 ({100 - success_percentage:.1f}%)")
+                else:
+                    logger.info("所有消息转发成功")
+                
+            else:
+                # 源频道禁止转发，直接使用备用方式
+                logger.warning("源频道禁止转发消息，将使用备用方式: 下载文件后上传")
                 try:
+                    # 初始化结果字典
+                    result = {
+                        "forwards_restricted": True,
+                        "total": end_message_id - start_message_id + 1 if end_message_id and start_message_id else 0,
+                        "processed": 0,
+                        "success": 0,
+                        "failed": 0,
+                        "start_time": time.time()
+                    }
+                    
                     # 读取配置文件以获取并行设置
                     config_parser = configparser.ConfigParser()
                     config_parser.read(self.config_path, encoding='utf-8')
@@ -326,40 +379,10 @@ class ForwardManager:
                     logger.error(f"备用方式处理时出错: {repr(e)}")
                     result["backup_error"] = str(e)
             
-            # 如果有转发失败的消息(但源频道不是禁止转发的)，直接跳过而不下载
-            elif result.get("failed", 0) > 0 and "failed_messages" in result:
-                failed_count = result.get("failed", 0)
-                failed_message_ids = result["failed_messages"]
-                logger.warning(f"检测到 {failed_count} 条消息转发失败，但不是因为源频道禁止转发，将直接跳过这些消息")
-                
-                # 仅记录失败的消息ID，不下载
-                if failed_message_ids:
-                    logger.info(f"转发失败的消息ID: {', '.join(map(str, failed_message_ids[:10]))}" + 
-                               (f"... 等共 {len(failed_message_ids)} 条" if len(failed_message_ids) > 10 else ""))
-                
-                # 显示详细错误信息
-                if "error_messages" in result and result["error_messages"]:
-                    error_messages = result["error_messages"]
-                    # 如果错误消息很多，只显示前几条和统计信息
-                    if len(error_messages) > 5:
-                        logger.warning(f"转发失败的主要错误信息 (共 {len(error_messages)} 条):")
-                        for i, msg in enumerate(error_messages[:5], 1):
-                            logger.warning(f"  {i}. {msg}")
-                        logger.warning(f"  ... 以及其他 {len(error_messages) - 5} 条错误")
-                    else:
-                        logger.warning("转发失败的错误信息:")
-                        for i, msg in enumerate(error_messages, 1):
-                            logger.warning(f"  {i}. {msg}")
-                
-                # 记录总体转发结果
-                total_messages = result.get("total", 0)
-                success_count = result.get("success", 0)
-                success_percentage = (success_count / total_messages * 100) if total_messages > 0 else 0
-                
-                logger.info(f"转发总结: 总计 {total_messages} 条消息，成功 {success_count} 条 ({success_percentage:.1f}%)，"
-                           f"失败 {failed_count} 条 ({100 - success_percentage:.1f}%)")
-            else:
-                logger.info("所有消息转发成功，无需下载源频道消息")
+            # 计算总耗时
+            result["end_time"] = time.time()
+            result["duration"] = result.get("end_time", 0) - result.get("start_time", 0)
+            logger.info(f"总耗时: {result.get('duration', 0):.2f}秒")
             
             return result
         

@@ -505,7 +505,7 @@ class CustomMediaGroupSender:
                     progress_args=(tracker,) if tracker else None
                 )
                 file_id = message.video.file_id
-                
+            
             else:
                 message = await client_to_use.send_document(
                     chat_id=chat_id,
@@ -550,7 +550,7 @@ class CustomMediaGroupSender:
         """
         if not MOVIEPY_AVAILABLE:
             return None
-        
+            
         thumb_path = None
         video = None
         
@@ -564,31 +564,31 @@ class CustomMediaGroupSender:
             
             # 获取视频时长的25%位置的帧
             frame_time = max(0.1, min(video.duration * 0.25, video.duration - 0.1))
-            
+                
             # 获取视频的帧
             video_frame = video.get_frame(frame_time)
-            
+                
             # 创建临时图像并保存为JPEG
             from PIL import Image
             import numpy as np
             image = Image.fromarray(np.uint8(video_frame))
-            
+                
             # 调整图像大小以适应Telegram缩略图要求(不超过320px)
             width, height = image.size
             max_size = 320
-            
+                
             if width > height:
                 new_width = min(width, max_size)
                 new_height = int(height * (new_width / width))
             else:
                 new_height = min(height, max_size)
                 new_width = int(width * (new_height / height))
-            
+                
             image = image.resize((new_width, new_height), Image.LANCZOS)
-            
+                
             # 保存缩略图，质量设为90%以确保文件小于200KB
             image.save(thumb_path, 'JPEG', quality=90, optimize=True)
-            
+                
             # 检查文件大小是否超过200KB，如果超过则压缩
             if os.path.getsize(thumb_path) > 200 * 1024:
                 # 递减质量直到文件小于200KB
@@ -596,7 +596,7 @@ class CustomMediaGroupSender:
                 while os.path.getsize(thumb_path) > 200 * 1024 and quality > 10:
                     image.save(thumb_path, 'JPEG', quality=quality, optimize=True)
                     quality -= 10
-            
+                
             logger.info(f"已生成视频缩略图: {os.path.basename(video_path)}")
             return thumb_path
                 
@@ -698,7 +698,7 @@ class CustomMediaGroupSender:
                 # 更新文件处理进度条
                 if TQDM_AVAILABLE and file_pbar:
                     file_pbar.update(1)
-        
+            
         # 检查是否有成功上传的媒体
         if not media_list:
             logger.error("没有成功上传任何媒体文件，无法发送媒体组")
@@ -1144,7 +1144,7 @@ class CustomMediaGroupSender:
         # 统计结果
         elapsed_time = time.time() - start_time
         logger.info(f"✅ 全部完成! 成功: {results['success']}/{len(valid_channels)}，耗时: {elapsed_time:.2f}秒")
-        
+            
         return results
 
     async def validate_channels(self) -> List[str]:
@@ -1169,7 +1169,7 @@ class CustomMediaGroupSender:
             target_channels: 目标频道列表
             delete_after_upload: 上传后是否删除源文件
             channel_forward_status: 频道转发状态缓存
-        
+            
         返回:
             上传结果统计
         """
