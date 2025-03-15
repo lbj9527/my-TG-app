@@ -368,6 +368,7 @@ class ForwardManager:
                                 # 更新统计信息，将上传的文件数设为成功数
                                 result["success"] = uploaded_files
                                 result["failed"] = 0  # 既然备用上传成功，失败数应为0
+                                result["success_flag"] = True  # 设置整体操作成功标志
                             else:
                                 logger.error(f"备用上传失败: {upload_result.get('error', '未知错误')}")
                         else:
