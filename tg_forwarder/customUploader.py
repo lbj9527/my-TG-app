@@ -823,54 +823,22 @@ class CustomMediaGroupSender:
             logger.info(f"转发 {from_chat_id} → {to_chat_id} ({len(messages)}条消息，分{len(batches)}批)")
             
             for batch_idx, batch in enumerate(batches):
-                try:
-                    # 根据hide_author参数决定使用何种方式
-                    if hide_author:
-                        # 检查是否是媒体组
-                        msg = batch[0]
-                        media_group_id = getattr(msg, 'media_group_id', None)
-                        
-                        if media_group_id and all(getattr(m, 'media_group_id', None) == media_group_id for m in batch):
-                            # 整体复制媒体组
-                            batch_result = await self._copy_media_group(from_chat_actual, to_chat_actual, batch[0].id)
-                        else:
-                            # 逐条复制消息
-                            batch_result = await self._copy_messages(from_chat_actual, to_chat_actual, batch)
-                    else:
-                        # 使用直接转发
-                        message_ids = [msg.id for msg in batch]
-                        batch_result = await self.client.forward_messages(
-                            chat_id=to_chat_actual,
-                            from_chat_id=from_chat_actual,
-                            message_ids=message_ids
-                        )
-                    
-                    # 处理结果
-                    if batch_result:
-                        forwarded_messages.extend(batch_result if isinstance(batch_result, list) else [batch_result])
-                        total_success += len(batch_result) if isinstance(batch_result, list) else 1
-                        
-                    # 批次间添加短暂延迟，避免频率限制
-                    if batch_idx < len(batches) - 1:
-                        await asyncio.sleep(0.5)
-                        
-                except FloodWait as e:
-                    logger.warning(f"转发受限，等待 {e.value} 秒后重试")
-                    await asyncio.sleep(e.value)
-                    
-                    # 重试
-                    message_ids = [msg.id for msg in batch]
-                    retry_result = await self.client.forward_messages(
-                        chat_id=to_chat_actual,
-                        from_chat_id=from_chat_actual,
-                        message_ids=message_ids
-                    )
-                    
-                    if retry_result:
-                        forwarded_messages.extend(retry_result if isinstance(retry_result, list) else [retry_result])
-                        total_success += len(retry_result) if isinstance(retry_result, list) else 1
-                except Exception as e:
-                    logger.error(f"转发批次 {batch_idx+1}/{len(batches)} 失败: {str(e)[:50]}")
+                batch_result = await self._forward_message_batch(
+                    from_chat_actual, 
+                    to_chat_actual, 
+                    batch, 
+                    hide_author,
+                    batch_idx,
+                    len(batches)
+                )
+                
+                if batch_result:
+                    forwarded_messages.extend(batch_result if isinstance(batch_result, list) else [batch_result])
+                    total_success += len(batch_result) if isinstance(batch_result, list) else 1
+                
+                # 批次间添加短暂延迟，避免频率限制
+                if batch_idx < len(batches) - 1:
+                    await asyncio.sleep(0.5)
             
             # 返回结果
             is_success = total_success > 0
@@ -885,6 +853,59 @@ class CustomMediaGroupSender:
             logger.error(f"转发过程出错: {str(e)[:50]}")
             return False, []
             
+    async def _forward_message_batch(self, from_chat_id: str, to_chat_id: str, batch: List[Message], 
+                                     hide_author: bool, batch_idx: int, total_batches: int) -> List[Message]:
+        """
+        转发一批消息
+        
+        参数:
+            from_chat_id: 源频道ID
+            to_chat_id: 目标频道ID
+            batch: 消息批次
+            hide_author: 是否隐藏作者
+            batch_idx: 当前批次索引
+            total_batches: 总批次数
+            
+        返回:
+            List[Message]: 转发的消息列表
+        """
+        try:
+            # 根据hide_author参数决定使用何种方式
+            if hide_author:
+                # 检查是否是媒体组
+                msg = batch[0]
+                media_group_id = getattr(msg, 'media_group_id', None)
+                
+                if media_group_id and all(getattr(m, 'media_group_id', None) == media_group_id for m in batch):
+                    # 整体复制媒体组
+                    return await self._copy_media_group(from_chat_id, to_chat_id, batch[0].id)
+                else:
+                    # 逐条复制消息
+                    return await self._copy_messages(from_chat_id, to_chat_id, batch)
+            else:
+                # 使用直接转发
+                message_ids = [msg.id for msg in batch]
+                return await self.client.forward_messages(
+                    chat_id=to_chat_id,
+                    from_chat_id=from_chat_id,
+                    message_ids=message_ids
+                )
+                
+        except FloodWait as e:
+            logger.warning(f"转发批次 {batch_idx+1}/{total_batches} 受限，等待 {e.value} 秒后重试")
+            await asyncio.sleep(e.value)
+            
+            # 重试
+            message_ids = [msg.id for msg in batch]
+            return await self.client.forward_messages(
+                chat_id=to_chat_id,
+                from_chat_id=from_chat_id,
+                message_ids=message_ids
+            )
+        except Exception as e:
+            logger.error(f"转发批次 {batch_idx+1}/{total_batches} 失败: {str(e)[:50]}")
+            return []
+    
     async def _copy_media_group(self, from_chat_id: str, to_chat_id: str, message_id: int) -> List[Message]:
         """复制媒体组"""
         try:
@@ -990,49 +1011,13 @@ class CustomMediaGroupSender:
             
         # 第2步: 找到适合的第一个频道作为转发源
         logger.info("🔍 步骤2：查找合适的第一个频道作为转发源")
-        first_channel = None
-        
-        # 优先使用允许转发的频道，但要确保能获取到实际ID
-        if self.channel_forward_status:
-            # 按照转发状态对频道进行排序
-            sorted_channels = sorted(
-                valid_channels,
-                key=lambda x: 0 if self.channel_forward_status.get(str(x), True) else 1
-            )
-            
-            # 找到第一个允许转发的频道，且确保该频道的ID可用
-            for channel in sorted_channels:
-                if self.channel_forward_status.get(str(channel), True):
-                    # 检查是否有该频道的实际ID
-                    channel_str = str(channel)
-                    if channel_str in self.actual_chat_ids:
-                        actual_id = self.actual_chat_ids[channel_str]
-                        # 验证ID格式是否正确
-                        if self._is_valid_chat_id_format(actual_id):
-                            first_channel = channel
-                            logger.info(f"✅ 找到允许转发的频道: {first_channel} (实际ID: {actual_id})")
-                            break
-                        else:
-                            logger.warning(f"⚠️ 跳过频道 {channel}，ID格式不正确: {actual_id}")
-                    else:
-                        logger.warning(f"⚠️ 跳过频道 {channel}，无法获取实际ID")
-        
-        # 如果没有找到允许转发的频道，使用第一个有效频道（但要确保ID可用）
-        if not first_channel and valid_channels:
-            for channel in valid_channels:
-                channel_str = str(channel)
-                if channel_str in self.actual_chat_ids:
-                    actual_id = self.actual_chat_ids[channel_str]
-                    if self._is_valid_chat_id_format(actual_id):
-                        first_channel = channel
-                        logger.warning(f"⚠️ 没有找到允许转发的频道，将使用: {first_channel} (实际ID: {actual_id})")
-                        break
+        first_channel = self._find_suitable_first_channel(valid_channels)
         
         if not first_channel:
             logger.error("❌ 无法确定第一个目标频道，流程终止")
             results["fail"] = len(valid_channels)
             return results
-            
+
         # 获取第一个频道的实际ID
         first_channel_actual = self.get_actual_chat_id(first_channel)
         
@@ -1437,6 +1422,54 @@ class CustomMediaGroupSender:
                             logger.info(f"✓ 匹配到私有频道: {channel_str} -> {stored_key}")
                             return stored_key
                             
+        return None
+
+    def _find_suitable_first_channel(self, valid_channels: List[str]) -> Optional[str]:
+        """
+        查找适合作为第一个转发源的频道
+        
+        参数:
+            valid_channels: 有效频道列表
+            
+        返回:
+            str: 适合的第一个频道，如果没有则返回None
+        """
+        if not valid_channels:
+            return None
+            
+        # 优先使用允许转发的频道，但要确保能获取到实际ID
+        if self.channel_forward_status:
+            # 按照转发状态对频道进行排序
+            sorted_channels = sorted(
+                valid_channels,
+                key=lambda x: 0 if self.channel_forward_status.get(str(x), True) else 1
+            )
+            
+            # 找到第一个允许转发的频道，且确保该频道的ID可用
+            for channel in sorted_channels:
+                if self.channel_forward_status.get(str(channel), True):
+                    # 检查是否有该频道的实际ID
+                    channel_str = str(channel)
+                    if channel_str in self.actual_chat_ids:
+                        actual_id = self.actual_chat_ids[channel_str]
+                        # 验证ID格式是否正确
+                        if self._is_valid_chat_id_format(actual_id):
+                            logger.info(f"✅ 找到允许转发的频道: {channel} (实际ID: {actual_id})")
+                            return channel
+                        else:
+                            logger.warning(f"⚠️ 跳过频道 {channel}，ID格式不正确: {actual_id}")
+                    else:
+                        logger.warning(f"⚠️ 跳过频道 {channel}，无法获取实际ID")
+        
+        # 如果没有找到允许转发的频道，使用第一个有效频道（但要确保ID可用）
+        for channel in valid_channels:
+            channel_str = str(channel)
+            if channel_str in self.actual_chat_ids:
+                actual_id = self.actual_chat_ids[channel_str]
+                if self._is_valid_chat_id_format(actual_id):
+                    logger.warning(f"⚠️ 没有找到允许转发的频道，将使用: {channel} (实际ID: {actual_id})")
+                    return channel
+                    
         return None
 
     @classmethod

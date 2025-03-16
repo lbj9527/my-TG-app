@@ -464,17 +464,26 @@ class MessageForwarder:
         # 添加源消息列表到结果中
         stats["source_messages"] = source_messages
         
+        # 汇总一次性输出处理结果，避免重复日志
         logger.info(f"消息处理完成: 总数 {stats['total']}, 处理 {stats['processed']}, 成功 {success_count}, 失败 {stats['failed']}, 跳过 {stats['skipped']}")
         if stats["skipped_emoji"] > 0:
             logger.info(f"跳过的Emoji消息数: {stats['skipped_emoji']}")
         if stats["failed"] > 0:
-            logger.info(f"转发失败的消息ID: {stats['failed_messages']}")
+            # 限制显示失败ID的数量，避免日志过长
+            failed_ids_display = stats['failed_messages'][:20]  
+            logger.info(f"转发失败的消息ID: {failed_ids_display}" + 
+                        (f"... 等{len(stats['failed_messages'])}条" if len(stats['failed_messages']) > 20 else ""))
             
             # 输出详细的错误信息
             if stats["error_messages"]:
-                logger.warning("转发失败的详细错误信息:")
-                for i, error_msg in enumerate(stats["error_messages"], 1):
+                # 去除重复的错误信息
+                unique_errors = list(set(stats["error_messages"]))
+                logger.warning(f"转发失败的详细错误信息 (共{len(unique_errors)}条不同错误):")
+                for i, error_msg in enumerate(unique_errors[:5], 1):
                     logger.warning(f"  {i}. {error_msg}")
+                
+                if len(unique_errors) > 5:
+                    logger.warning(f"  ... 以及其他 {len(unique_errors) - 5} 种错误")
                     
                 # 如果错误信息超过5条，统计错误类型
                 if len(stats["error_messages"]) > 5:
