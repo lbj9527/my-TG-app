@@ -217,20 +217,82 @@ class MediaDownloader:
         
         logger.info(f"媒体下载器初始化完成，临时文件夹: {self.temp_folder}")
     
-    async def _download_media_with_retry(self, message: Message, folder: str) -> Optional[str]:
-        """
-        带重试的媒体下载
+    def _get_media_type(self, message: Message) -> Optional[str]:
+        """获取消息中媒体的类型"""
+        if message.photo:
+            return "photo"
+        elif message.video:
+            return "video"
+        elif message.audio:
+            return "audio"
+        elif message.document:
+            return "document"
+        elif message.animation:
+            return "animation"
+        elif message.voice:
+            return "audio"  # 语音也保存在audio文件夹
+        elif message.video_note:
+            return "video"  # 视频笔记也保存在video文件夹
         
-        参数:
-            message: 消息对象
-            folder: 保存文件夹路径
-            
+        return None
+    
+    def _get_media_size(self, message: Message) -> int:
+        """获取媒体文件大小"""
+        if message.photo:
+            return message.photo.file_size or 0
+        elif message.video:
+            return message.video.file_size or 0
+        elif message.audio:
+            return message.audio.file_size or 0
+        elif message.voice:
+            return message.voice.file_size or 0
+        elif message.document:
+            return message.document.file_size or 0
+        elif message.animation:
+            return message.animation.file_size or 0
+        elif message.video_note:
+            return message.video_note.file_size or 0
+        return 0
+    
+    def _get_extension_for_media(self, message: Message) -> str:
+        """根据媒体类型获取适当的文件扩展名"""
+        if message.photo:
+            return ".jpg"
+        elif message.video:
+            # 尝试获取原始文件扩展名
+            if message.video.file_name:
+                _, ext = os.path.splitext(message.video.file_name)
+                if ext:
+                    return ext
+            return ".mp4"
+        elif message.audio:
+            if message.audio.file_name:
+                _, ext = os.path.splitext(message.audio.file_name)
+                if ext:
+                    return ext
+            return ".mp3"
+        elif message.voice:
+            return ".ogg"
+        elif message.document:
+            if message.document.file_name:
+                _, ext = os.path.splitext(message.document.file_name)
+                if ext:
+                    return ext
+        elif message.animation:
+            return ".mp4"
+        elif message.video_note:
+            return ".mp4"
+        
+        # 默认返回空，将在下载时使用.bin
+        return ""
+    
+    def _generate_unique_filename(self, message: Message) -> Tuple[str, int]:
+        """
+        为媒体消息生成唯一文件名
+        
         返回:
-            Optional[str]: 下载文件的路径，如果下载失败则返回None
+            Tuple[str, int]: (文件名, 文件大小)
         """
-        max_retries = 3
-        retry_count = 0
-        
         # 获取原始文件名（如果有）
         original_filename = None
         file_size = 0
@@ -268,6 +330,47 @@ class MediaDownloader:
             # 如果没有原始文件名，使用ID和扩展名
             unique_filename = f"{chat_id}_{message.id}{extension or '.bin'}"
             
+        return unique_filename, file_size
+    
+    async def _progress_callback(self, current, total):
+        """下载进度回调函数"""
+        if total <= 0:
+            return
+            
+        # 获取当前正在下载的消息ID
+        active_downloads = list(self.active_trackers.keys())
+        if not active_downloads:
+            return
+            
+        msg_id = active_downloads[0]
+        tracker = self.active_trackers.get(msg_id)
+        
+        if tracker:
+            tracker.update(current)
+    
+    async def _wait_flood_wait(self, wait_time: int):
+        """处理FloodWait错误等待"""
+        # 使用tqdm显示等待倒计时
+        if TQDM_AVAILABLE:
+            wait_desc = "等待限制解除" if not COLORAMA_AVAILABLE else f"{Fore.RED}等待限制解除{Style.RESET_ALL}"
+            with tqdm(total=wait_time, desc=wait_desc, unit="秒", 
+                    bar_format=WAIT_BAR_FORMAT,
+                    colour='red' if not COLORAMA_AVAILABLE else None) as wait_pbar:
+                for _ in range(wait_time):
+                    await asyncio.sleep(1)
+                    wait_pbar.update(1)
+        else:
+            await asyncio.sleep(wait_time)
+    
+    async def download_media_from_message(self, message: Message) -> Optional[str]:
+        """从单个消息中下载媒体文件，改进的统一版本"""
+        # 跳过非媒体消息
+        if not message or not message.media:
+            return None
+        
+        # 生成唯一文件名和获取文件大小
+        unique_filename, file_size = self._generate_unique_filename(message)
+        
         # 创建唯一的消息标识
         msg_id = f"{message.chat.id}_{message.id}"
         
@@ -285,23 +388,23 @@ class MediaDownloader:
         else:
             logger.info(f"开始下载: {unique_filename} ({format_size(file_size)})")
         
+        # 带重试的媒体下载
+        max_retries = 3
+        retry_count = 0
+        
         try:
             while retry_count < max_retries:
                 try:
                     try:
                         # 下载媒体文件
                         file_path = await message.download(
-                            file_name=os.path.join(folder, unique_filename),
+                            file_name=os.path.join(self.temp_folder, unique_filename),
                             block=True,
                             progress=self._progress_callback
                         )
                         
                         if file_path:
                             logger.info(f"成功下载媒体文件: {file_path}")
-                            # 关闭进度跟踪器
-                            if msg_id in self.active_trackers:
-                                self.active_trackers[msg_id].close(True)
-                                del self.active_trackers[msg_id]
                             return file_path
                         else:
                             logger.warning(f"下载媒体文件失败，返回了空路径")
@@ -323,138 +426,63 @@ class MediaDownloader:
                 except FloodWait as e:
                     # 遇到Telegram限流
                     logger.warning(f"触发Telegram限流，等待{e.value}秒...")
-                    
-                    # 使用tqdm显示等待倒计时
-                    if TQDM_AVAILABLE:
-                        wait_desc = "等待限制解除" if not COLORAMA_AVAILABLE else f"{Fore.RED}等待限制解除{Style.RESET_ALL}"
-                        with tqdm(total=e.value, desc=wait_desc, unit="秒", 
-                                bar_format=WAIT_BAR_FORMAT,
-                                colour='red' if not COLORAMA_AVAILABLE else None) as wait_pbar:
-                            for _ in range(e.value):
-                                await asyncio.sleep(1)
-                                wait_pbar.update(1)
-                    else:
-                        await asyncio.sleep(e.value)
-                    
+                    await self._wait_flood_wait(e.value)
                     # 不计入重试次数，因为这是Telegram的限制
                 
                 except Exception as e:
                     logger.error(f"下载媒体文件时出错: {str(e)}")
                     retry_count += 1
                     await asyncio.sleep(2)  # 等待2秒后重试
-        
+            
+            if retry_count >= max_retries:
+                logger.error(f"媒体文件下载失败，已重试{max_retries}次")
+                
+            return None
+            
         finally:
             # 确保关闭进度跟踪器
             if msg_id in self.active_trackers:
-                self.active_trackers[msg_id].close(False)
+                self.active_trackers[msg_id].close(file_path is not None if 'file_path' in locals() else False)
                 del self.active_trackers[msg_id]
-                
-        if retry_count >= max_retries:
-            logger.error(f"媒体文件下载失败，已重试{max_retries}次")
-            
-        return None
     
-    async def _progress_callback(self, current, total):
-        """下载进度回调函数"""
-        if total <= 0:
-            return
-            
-        # 获取当前正在下载的消息ID
-        active_downloads = list(self.active_trackers.keys())
-        if not active_downloads:
-            return
-            
-        msg_id = active_downloads[0]
-        tracker = self.active_trackers.get(msg_id)
-        
-        if tracker:
-            tracker.update(current)
-    
-    def _get_extension_for_media(self, message: Message) -> str:
+    async def download_messages_batch(self, messages: List[Message], batch_desc: str = None) -> Dict[int, Optional[str]]:
         """
-        根据媒体类型获取适当的文件扩展名
-        
-        参数:
-            message: 消息对象
-            
-        返回:
-            str: 文件扩展名（包括点号）
-        """
-        if message.photo:
-            return ".jpg"
-        elif message.video:
-            # 尝试获取原始文件扩展名
-            if message.video.file_name:
-                _, ext = os.path.splitext(message.video.file_name)
-                if ext:
-                    return ext
-            return ".mp4"
-        elif message.audio:
-            if message.audio.file_name:
-                _, ext = os.path.splitext(message.audio.file_name)
-                if ext:
-                    return ext
-            return ".mp3"
-        elif message.voice:
-            return ".ogg"
-        elif message.document:
-            if message.document.file_name:
-                _, ext = os.path.splitext(message.document.file_name)
-                if ext:
-                    return ext
-        elif message.animation:
-            return ".mp4"
-        elif message.video_note:
-            return ".mp4"
-        
-        # 默认返回空，将在下载时使用.bin
-        return ""
-    
-    async def download_media_from_message(self, message: Message) -> Optional[str]:
-        """
-        从消息中下载媒体文件
-        
-        参数:
-            message: 消息对象
-            
-        返回:
-            Optional[str]: 下载文件的路径，如果消息不包含媒体或下载失败则返回None
-        """
-        if not message.media:
-            return None
-        
-        # 直接下载到临时文件夹
-        return await self._download_media_with_retry(message, self.temp_folder)
-    
-    async def download_media_from_messages(self, messages: List[Message]) -> Dict[int, Optional[str]]:
-        """
-        从多个消息中下载媒体文件
+        下载一批消息中的媒体文件
         
         参数:
             messages: 消息对象列表
+            batch_desc: 批次描述，用于日志显示
             
         返回:
             Dict[int, Optional[str]]: 下载结果，格式为 {消息ID: 文件路径}
         """
         results = {}
         
-        # 显示文件总数和大小
-        total_size = sum(self._get_media_size(msg) for msg in messages if msg.media)
+        # 跳过无媒体的消息
+        media_messages = [msg for msg in messages if msg and msg.media]
         
+        if not media_messages:
+            logger.info("当前批次中没有包含媒体的消息，跳过下载")
+            return results
+        
+        # 显示文件总数和大小
+        total_size = sum(self._get_media_size(msg) for msg in media_messages)
+        
+        batch_info = f"{batch_desc} " if batch_desc else ""
         if COLORAMA_AVAILABLE:
             logger.info(
-                f"{Fore.YELLOW}准备下载 {len(messages)} 个文件 "
+                f"{Fore.YELLOW}准备下载{batch_info}{len(media_messages)} 个文件 "
                 f"(总大小: {Fore.CYAN}{format_size(total_size)}{Style.RESET_ALL}{Fore.YELLOW})"
             )
         else:
-            logger.info(f"准备下载 {len(messages)} 个文件 (总大小: {format_size(total_size)})")
+            logger.info(f"准备下载{batch_info}{len(media_messages)} 个文件 (总大小: {format_size(total_size)})")
         
         # 创建总进度条
         total_pbar = None
-        if TQDM_AVAILABLE and len(messages) > 1:
-            total_desc = f"总进度" if not COLORAMA_AVAILABLE else f"{Fore.CYAN}总进度{Style.RESET_ALL}"
+        if TQDM_AVAILABLE and len(media_messages) > 1:
+            total_desc = f"总进度{batch_info}" if not COLORAMA_AVAILABLE else f"{Fore.CYAN}总进度{batch_info}{Style.RESET_ALL}"
             total_pbar = tqdm(
-                total=len(messages),
+                total=len(media_messages),
                 unit='个',
                 desc=total_desc,
                 position=1,
@@ -464,7 +492,7 @@ class MediaDownloader:
             )
         
         try:
-            for i, message in enumerate(messages):
+            for i, message in enumerate(media_messages):
                 file_path = await self.download_media_from_message(message)
                 results[message.id] = file_path
                 
@@ -473,15 +501,15 @@ class MediaDownloader:
                     total_pbar.update(1)
                     
                 # 每下载5个文件或最后一个文件时显示进度信息
-                if (i + 1) % 5 == 0 or i == len(messages) - 1:
+                if (i + 1) % 5 == 0 or i == len(media_messages) - 1:
                     success_count = sum(1 for path in results.values() if path is not None)
                     if COLORAMA_AVAILABLE:
                         logger.info(
-                            f"{Fore.CYAN}下载进度: {success_count}/{len(messages)} 文件完成 "
-                            f"({Fore.YELLOW}{success_count/len(messages)*100:.1f}%{Style.RESET_ALL})"
+                            f"{Fore.CYAN}下载进度: {success_count}/{len(media_messages)} 文件完成 "
+                            f"({Fore.YELLOW}{success_count/len(media_messages)*100:.1f}%{Style.RESET_ALL})"
                         )
                     else:
-                        logger.info(f"下载进度: {success_count}/{len(messages)} 文件完成 ({success_count/len(messages)*100:.1f}%)")
+                        logger.info(f"下载进度: {success_count}/{len(media_messages)} 文件完成 ({success_count/len(media_messages)*100:.1f}%)")
         
         finally:
             # 关闭总进度条
@@ -493,120 +521,65 @@ class MediaDownloader:
         
         if COLORAMA_AVAILABLE:
             logger.info(
-                f"{Fore.GREEN}{Style.BRIGHT}媒体下载统计: 总共 {Fore.YELLOW}{len(messages)}{Style.RESET_ALL}"
+                f"{Fore.GREEN}{Style.BRIGHT}媒体下载统计: 总共 {Fore.YELLOW}{len(media_messages)}{Style.RESET_ALL}"
                 f"{Fore.GREEN}{Style.BRIGHT} 个文件, 成功 {Fore.CYAN}{success_count}{Style.RESET_ALL}"
-                f"{Fore.GREEN}{Style.BRIGHT} 个 ({Fore.YELLOW}{success_count/len(messages)*100:.1f}%{Style.RESET_ALL}"
+                f"{Fore.GREEN}{Style.BRIGHT} 个 ({Fore.YELLOW}{success_count/len(media_messages)*100:.1f}%{Style.RESET_ALL}"
                 f"{Fore.GREEN}{Style.BRIGHT} 完成率){Style.RESET_ALL}"
             )
         else:
-            logger.info(f"媒体下载统计: 总共 {len(messages)} 个文件, 成功 {success_count} 个 ({success_count/len(messages)*100:.1f}% 完成率)")
+            logger.info(f"媒体下载统计: 总共 {len(media_messages)} 个文件, 成功 {success_count} 个 ({success_count/len(media_messages)*100:.1f}% 完成率)")
         
         return results
     
-    def _get_media_type(self, message: Message) -> Optional[str]:
-        """
-        获取消息中媒体的类型
-        
-        参数:
-            message: 消息对象
-            
-        返回:
-            Optional[str]: 媒体类型，如果没有媒体则返回None
-        """
-        if message.photo:
-            return "photo"
-        elif message.video:
-            return "video"
-        elif message.audio:
-            return "audio"
-        elif message.document:
-            return "document"
-        elif message.animation:
-            return "animation"
-        elif message.voice:
-            return "audio"  # 语音也保存在audio文件夹
-        elif message.video_note:
-            return "video"  # 视频笔记也保存在video文件夹
-        
-        return None
-    
-    def _get_media_size(self, message: Message) -> int:
-        """获取媒体文件大小"""
-        if message.photo:
-            return message.photo.file_size or 0
-        elif message.video:
-            return message.video.file_size or 0
-        elif message.audio:
-            return message.audio.file_size or 0
-        elif message.voice:
-            return message.voice.file_size or 0
-        elif message.document:
-            return message.document.file_size or 0
-        elif message.animation:
-            return message.animation.file_size or 0
-        elif message.video_note:
-            return message.video_note.file_size or 0
-        return 0
-    
     async def download_media_group(self, media_group: List[Message]) -> Dict[int, Optional[str]]:
-        """
-        下载媒体组中的所有媒体文件
-        
-        参数:
-            media_group: 媒体组消息列表
-            
-        返回:
-            Dict[int, Optional[str]]: 下载结果，格式为 {消息ID: 文件路径}
-        """
+        """下载媒体组中的所有媒体文件"""
         if not media_group:
             return {}
         
+        group_id = media_group[0].media_group_id
         if COLORAMA_AVAILABLE:
-            logger.info(f"{Fore.CYAN}{Style.BRIGHT}开始下载媒体组 (组ID: {media_group[0].media_group_id}), 共 {len(media_group)} 个文件{Style.RESET_ALL}")
+            group_desc = f"{Fore.CYAN}{Style.BRIGHT}媒体组 (ID: {group_id}){Style.RESET_ALL}"
         else:
-            logger.info(f"开始下载媒体组 (组ID: {media_group[0].media_group_id}), 共 {len(media_group)} 个文件")
+            group_desc = f"媒体组 (ID: {group_id})"
             
-        return await self.download_media_from_messages(media_group)
+        return await self.download_messages_batch(media_group, group_desc)
     
     async def download_forwarded_messages(self, forward_results: Dict[str, List[Message]]) -> Dict[str, Dict[int, Optional[str]]]:
-        """
-        下载已转发的消息中的媒体文件
-        
-        Args:
-            forward_results: 转发结果字典，键为目标聊天ID，值为消息列表
-            
-        Returns:
-            Dict[str, Dict[int, Optional[str]]]: 下载结果
-        """
+        """下载已转发的消息中的媒体文件"""
         result = {}
         
         # 计算所有文件的总数和总大小
         total_messages = sum(len(messages) for messages in forward_results.values())
+        media_messages = 0
         total_size = 0
+        
         for chat_id, messages in forward_results.items():
             for msg in messages:
-                total_size += self._get_media_size(msg)
+                if msg and msg.media:
+                    media_messages += 1
+                    total_size += self._get_media_size(msg)
         
+        if media_messages == 0:
+            logger.info("没有找到任何媒体消息，跳过下载")
+            return result
+            
         if COLORAMA_AVAILABLE:
             logger.info(
-                f"{Fore.YELLOW}准备下载 {total_messages} 个文件 "
+                f"{Fore.YELLOW}准备从已转发消息下载 {media_messages} 个媒体文件 "
                 f"(总大小: {Fore.CYAN}{format_size(total_size)}{Style.RESET_ALL}{Fore.YELLOW})"
             )
         else:
-            logger.info(f"准备下载 {total_messages} 个文件 (总大小: {format_size(total_size)})")
+            logger.info(f"准备从已转发消息下载 {media_messages} 个媒体文件 (总大小: {format_size(total_size)})")
         
         for chat_id, messages in forward_results.items():
-            chat_result = {}
-            if COLORAMA_AVAILABLE:
-                logger.info(f"{Fore.CYAN}准备下载聊天 {chat_id} 中的 {len(messages)} 条消息的媒体...{Style.RESET_ALL}")
-            else:
-                logger.info(f"准备下载聊天 {chat_id} 中的 {len(messages)} 条消息的媒体...")
-            
             # 按媒体组分组
             media_groups = {}
             single_messages = []
             
             for msg in messages:
+                if not msg or not msg.media:
+                    continue
+                    
                 if msg.media_group_id:
                     if msg.media_group_id not in media_groups:
                         media_groups[msg.media_group_id] = []
@@ -614,32 +587,35 @@ class MediaDownloader:
                 else:
                     single_messages.append(msg)
             
+            chat_result = {}
+            
             # 下载媒体组消息
             for group_id, group_messages in media_groups.items():
+                if COLORAMA_AVAILABLE:
+                    logger.info(f"{Fore.CYAN}处理聊天 {chat_id} 中的媒体组 {group_id} (共 {len(group_messages)} 个文件){Style.RESET_ALL}")
+                else:
+                    logger.info(f"处理聊天 {chat_id} 中的媒体组 {group_id} (共 {len(group_messages)} 个文件)")
                 group_results = await self.download_media_group(group_messages)
                 chat_result.update(group_results)
             
-            # 下载单独消息
-            for msg in single_messages:
-                file_path = await self.download_media_from_message(msg)
-                chat_result[msg.id] = file_path
+            # 如果有单独消息
+            if single_messages:
+                if COLORAMA_AVAILABLE:
+                    logger.info(f"{Fore.CYAN}处理聊天 {chat_id} 中的 {len(single_messages)} 个单独媒体消息{Style.RESET_ALL}")
+                else:
+                    logger.info(f"处理聊天 {chat_id} 中的 {len(single_messages)} 个单独媒体消息")
+                single_results = await self.download_messages_batch(
+                    single_messages, 
+                    f"聊天 {chat_id} 单独消息"
+                )
+                chat_result.update(single_results)
             
             result[chat_id] = chat_result
         
         return result
     
     async def download_messages_from_source(self, source_chat_id, start_message_id, end_message_id) -> Dict[int, Optional[str]]:
-        """
-        直接从源频道下载指定范围内的媒体消息
-        
-        Args:
-            source_chat_id: 源聊天/频道的ID
-            start_message_id: 起始消息ID
-            end_message_id: 结束消息ID
-            
-        Returns:
-            Dict[int, Optional[str]]: 消息ID到下载文件路径的映射
-        """
+        """直接从源频道下载指定范围内的媒体消息"""
         result = {}
         
         try:
@@ -669,9 +645,6 @@ class MediaDownloader:
             message_ids = list(range(start_message_id, end_message_id + 1))
             total_messages = len(message_ids)
             
-            # 媒体组消息的缓存，避免重复处理
-            processed_media_groups = set()
-            
             # 使用get_messages_range方法获取消息
             try:
                 logger.info(f"获取消息范围: {start_message_id}-{end_message_id}")
@@ -680,6 +653,8 @@ class MediaDownloader:
                 # 按媒体组分组
                 media_groups = {}
                 single_messages = []
+                # 媒体组消息的缓存，避免重复处理
+                processed_media_groups = set()
                 
                 for msg in messages:
                     # 跳过非媒体消息
@@ -699,9 +674,9 @@ class MediaDownloader:
                 for group_id, group_messages in media_groups.items():
                     try:
                         if COLORAMA_AVAILABLE:
-                            logger.info(f"{Fore.YELLOW}下载媒体组 {group_id} 中的 {len(group_messages)} 个媒体文件{Style.RESET_ALL}")
+                            logger.info(f"{Fore.YELLOW}开始下载媒体组 {group_id} 中的 {len(group_messages)} 个媒体文件{Style.RESET_ALL}")
                         else:
-                            logger.info(f"下载媒体组 {group_id} 中的 {len(group_messages)} 个媒体文件")
+                            logger.info(f"开始下载媒体组 {group_id} 中的 {len(group_messages)} 个媒体文件")
                             
                         # 直接使用已获取的媒体组消息
                         group_results = await self.download_media_group(group_messages)
@@ -710,14 +685,19 @@ class MediaDownloader:
                     except Exception as e:
                         logger.error(f"下载媒体组 {group_id} 时出错: {str(e)}")
                 
-                # 下载单独消息
-                for msg in single_messages:
+                # 如果有单独消息
+                if single_messages:
+                    if COLORAMA_AVAILABLE:
+                        logger.info(f"{Fore.YELLOW}开始下载 {len(single_messages)} 个单独媒体消息{Style.RESET_ALL}")
+                    else:
+                        logger.info(f"开始下载 {len(single_messages)} 个单独媒体消息")
+                    
                     try:
-                        file_path = await self.download_media_from_message(msg)
-                        if file_path:
-                            result[msg.id] = file_path
+                        # 下载单独消息
+                        single_results = await self.download_messages_batch(single_messages, "单独消息")
+                        result.update(single_results)
                     except Exception as e:
-                        logger.error(f"下载消息 {msg.id} 时出错: {str(e)}")
+                        logger.error(f"下载单独消息时出错: {str(e)}")
             
             except Exception as e:
                 logger.error(f"获取消息范围时出错: {str(e)}")
