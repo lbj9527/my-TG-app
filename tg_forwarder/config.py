@@ -109,18 +109,6 @@ class Config:
         
         return forward_config
     
-    def get_media_config(self) -> Dict[str, Any]:
-        """获取媒体配置"""
-        media_config = {
-            'skip_media': False
-        }
-        
-        if 'MEDIA' in self.config:
-            if 'skip_media' in self.config['MEDIA']:
-                media_config['skip_media'] = self.config['MEDIA'].getboolean('skip_media')
-        
-        return media_config
-    
     def get_log_config(self) -> Dict[str, Any]:
         """获取日志配置"""
         if 'LOG' not in self.config:
@@ -134,40 +122,4 @@ class Config:
             'file': self.config.get('LOG', 'file', fallback='logs/app.log'),
         }
         
-        return log_config
-    
-    def get_download_config(self) -> Dict[str, Any]:
-        """获取下载配置"""
-        download_config = {
-            'temp_folder': './temp',
-            'timeout': 300,
-            'enabled': False
-        }
-        
-        if 'DOWNLOAD' in self.config:
-            if 'temp_folder' in self.config['DOWNLOAD']:
-                download_config['temp_folder'] = self.config['DOWNLOAD']['temp_folder']
-            
-            if 'timeout' in self.config['DOWNLOAD']:
-                download_config['timeout'] = self.config['DOWNLOAD'].getint('timeout')
-                
-            if 'enabled' in self.config['DOWNLOAD']:
-                download_config['enabled'] = self.config['DOWNLOAD'].getboolean('enabled')
-        
-        return download_config
-    
-    def get_upload_config(self) -> Dict[str, Any]:
-        """获取上传配置"""
-        upload_config = {
-            'enabled': False,
-            'upload_after_forward': True
-        }
-        
-        if 'UPLOAD' in self.config:
-            if 'enabled' in self.config['UPLOAD']:
-                upload_config['enabled'] = self.config['UPLOAD'].getboolean('enabled')
-            
-            if 'upload_after_forward' in self.config['UPLOAD']:
-                upload_config['upload_after_forward'] = self.config['UPLOAD'].getboolean('upload_after_forward')
-        
-        return upload_config 
+        return log_config 

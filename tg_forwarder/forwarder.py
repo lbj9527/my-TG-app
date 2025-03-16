@@ -12,7 +12,6 @@ import re
 
 from tg_forwarder.utils.logger import get_logger
 from tg_forwarder.channel_parser import ChannelParser
-from tg_forwarder.media_handler import MediaHandler
 # 导入公共工具函数
 from tg_forwarder.utils.common import get_client_instance
 
@@ -21,18 +20,16 @@ logger = get_logger("forwarder")
 class MessageForwarder:
     """消息转发类，负责消息转发的主要逻辑"""
     
-    def __init__(self, client, config: Dict[str, Any], media_handler: MediaHandler):
+    def __init__(self, client, config: Dict[str, Any]):
         """
         初始化消息转发器
         
         Args:
             client: Telegram客户端实例
             config: 转发配置信息
-            media_handler: 媒体处理器实例
         """
         self.client = client
         self.config = config
-        self.media_handler = media_handler
         
         self.start_message_id = config.get('start_message_id', 0)
         self.end_message_id = config.get('end_message_id', 0)
