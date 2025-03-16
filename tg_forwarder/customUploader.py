@@ -10,6 +10,7 @@ import mimetypes
 import re
 import sys
 import tempfile
+import contextlib
 from typing import List, Dict, Tuple, Any, Optional, Callable
 from datetime import datetime
 
@@ -370,11 +371,11 @@ class CustomMediaGroupSender:
             temp_folder: 临时文件夹
             channel_forward_status: 频道转发状态缓存
         """
+        # 基础属性设置
         self.client = client
         self.config_parser = config_parser
         self.target_channels = target_channels or []
         self.temp_folder = temp_folder or './temp'
-        # 保存频道转发状态缓存
         self.channel_forward_status = channel_forward_status or {}
         
         # 初始化频道验证器
@@ -383,47 +384,40 @@ class CustomMediaGroupSender:
         # 存储实际的聊天ID映射表
         self.actual_chat_ids = {}
         
-        # 日志记录
-        logger.info(f"已接收频道转发状态缓存: {len(self.channel_forward_status)} 个频道")
-        
-        # 添加缺失的属性默认值
-        self.hide_author = False
-        self.max_concurrent_batches = 3
-        self.max_concurrent_uploads = 3
-        
-        # 如果提供了config_parser，尝试从中读取配置
-        if config_parser and isinstance(config_parser, configparser.ConfigParser):
-            if config_parser.has_section("FORWARD"):
-                self.hide_author = config_parser.getboolean("FORWARD", "hide_author", fallback=False)
-                self.max_concurrent_batches = config_parser.getint("FORWARD", "max_concurrent_batches", fallback=3)
-            
-            if config_parser.has_section("UPLOAD"):
-                self.max_concurrent_uploads = config_parser.getint("UPLOAD", "max_concurrent_batches", fallback=3)
-        
-        # 设置自定义配置字典，用于内部使用
-        self.config = {
-            "temp_folder": "temp",
-            "target_channels": [],
-            "max_concurrent_batches": 3,
-            "hide_author": False,
-            "max_concurrent_uploads": 3,
-        }
-        
-        # 更新配置字典
-        self.config["temp_folder"] = self.temp_folder
-        self.config["target_channels"] = self.target_channels
-        self.config["hide_author"] = self.hide_author
-        self.config["max_concurrent_batches"] = self.max_concurrent_batches
-        self.config["max_concurrent_uploads"] = self.max_concurrent_uploads
+        # 读取配置并设置默认值
+        self._init_config()
         
         # 创建并发信号量
         self.semaphore = asyncio.Semaphore(self.max_concurrent_uploads)
         
-        # 初始化日志
-        logger.info(f"媒体发送器初始化完成: 目标频道数 {len(self.target_channels)}")
-        logger.info(f"隐藏消息来源: {self.hide_author}")
-        logger.info(f"临时文件夹: {self.temp_folder}")
-        logger.info(f"最大并发上传数: {self.max_concurrent_uploads}")
+        # 日志记录
+        logger.info(f"媒体发送器初始化完成: 目标频道数 {len(self.target_channels)}, "
+                    f"隐藏消息来源: {self.hide_author}, 最大并发上传数: {self.max_concurrent_uploads}")
+    
+    def _init_config(self):
+        """初始化配置，从config_parser读取设置或使用默认值"""
+        # 设置默认值
+        self.hide_author = False
+        self.max_concurrent_batches = 3
+        self.max_concurrent_uploads = 3
+        
+        # 从config_parser读取配置
+        if self.config_parser and isinstance(self.config_parser, configparser.ConfigParser):
+            if self.config_parser.has_section("FORWARD"):
+                self.hide_author = self.config_parser.getboolean("FORWARD", "hide_author", fallback=False)
+                self.max_concurrent_batches = self.config_parser.getint("FORWARD", "max_concurrent_batches", fallback=3)
+            
+            if self.config_parser.has_section("UPLOAD"):
+                self.max_concurrent_uploads = self.config_parser.getint("UPLOAD", "max_concurrent_batches", fallback=3)
+        
+        # 创建配置字典，便于内部使用
+        self.config = {
+            "temp_folder": self.temp_folder,
+            "target_channels": self.target_channels,
+            "max_concurrent_batches": self.max_concurrent_batches,
+            "hide_author": self.hide_author,
+            "max_concurrent_uploads": self.max_concurrent_uploads,
+        }
     
     def get_media_files(self, folder: str, limit: int = 10) -> List[str]:
         """获取指定文件夹下的媒体文件"""
@@ -792,213 +786,142 @@ class CustomMediaGroupSender:
         返回:
             Tuple[bool, List[Message]]: (成功标志, 转发后的消息列表)
         """
+        # 检查参数
+        if not messages:
+            logger.warning("没有提供要转发的消息")
+            return False, []
+            
         # 获取实际的频道ID
         from_chat_actual = self.get_actual_chat_id(from_chat_id)
         to_chat_actual = self.get_actual_chat_id(to_chat_id)
         
         # 验证ID格式
-        from_chat_str = str(from_chat_actual)
-        to_chat_str = str(to_chat_actual)
-        
-        # 检查源频道ID格式
-        if not (from_chat_str.startswith('-100') or (from_chat_str.isdigit() and len(from_chat_str) > 6)):
+        if not self._is_valid_chat_id_format(from_chat_actual):
             logger.error(f"❌ 源频道ID格式不正确: {from_chat_id} -> {from_chat_actual}")
             return False, []
             
-        # 检查目标频道ID格式
-        if not (to_chat_str.startswith('-100') or (to_chat_str.isdigit() and len(to_chat_str) > 6)):
+        if not self._is_valid_chat_id_format(to_chat_actual):
             logger.error(f"❌ 目标频道ID格式不正确: {to_chat_id} -> {to_chat_actual}")
             return False, []
         
-        if not messages:
-            logger.warning("没有提供要转发的消息")
-            return False, []
-        
-        # 首先检查源频道是否禁止转发
+        # 检查源频道是否禁止转发
         try:
             source_chat = await self.client.get_chat(from_chat_actual)
             if hasattr(source_chat, 'has_protected_content') and source_chat.has_protected_content:
-                logger.warning(f"源频道 {from_chat_id} (ID: {from_chat_actual}) 禁止转发消息 (has_protected_content=True)，无法转发")
+                logger.warning(f"源频道 {from_chat_id} 禁止转发消息")
                 return False, []
         except Exception as e:
-            # 如果获取频道信息失败，记录日志但继续尝试
-            logger.warning(f"检查源频道 {from_chat_id} (ID: {from_chat_actual}) 保护内容状态失败: {str(e)[:100]}")
+            logger.warning(f"检查源频道 {from_chat_id} 状态失败: {str(e)[:50]}")
         
-        # 检查目标频道状态
         try:
-            target_chat = await self.client.get_chat(to_chat_actual)
-            if hasattr(target_chat, 'has_protected_content') and target_chat.has_protected_content:
-                logger.info(f"目标频道 {to_chat_id} (ID: {to_chat_actual}) 设置了内容保护 (has_protected_content=True)，这不影响转发到该频道")
-        except Exception as e:
-            # 如果获取频道信息失败，记录日志但继续尝试
-            logger.warning(f"检查目标频道 {to_chat_id} (ID: {to_chat_actual}) 状态失败: {str(e)[:100]}")
+            forwarded_messages = []
+            total_success = 0
             
-        try:
-            # 分批转发（每批最多10个消息）
+            # 分批处理，每批最多10条消息
             batch_size = 10
             batches = [messages[i:i+batch_size] for i in range(0, len(messages), batch_size)]
+            logger.info(f"转发 {from_chat_id} → {to_chat_id} ({len(messages)}条消息，分{len(batches)}批)")
             
-            logger.info(f"频道转发: {from_chat_id} → {to_chat_id} (ID: {from_chat_actual} → {to_chat_actual}) (隐藏作者: {hide_author})")
-                
-            # 创建转发进度条
-            forward_desc = "转发消息"
-            with tqdm(total=len(batches), desc=forward_desc, unit="批", position=2,
-                     bar_format=BATCH_BAR_FORMAT,
-                     colour='blue') if TQDM_AVAILABLE else None as forward_pbar:
-                
-                # 存储所有转发后的消息
-                forwarded_messages = []
-                total_success_messages = 0  # 添加计数器统计实际成功的消息数
-                
-                for i, batch in enumerate(batches):
-                    try:
-                        batch_forwarded = []
+            for batch_idx, batch in enumerate(batches):
+                try:
+                    # 根据hide_author参数决定使用何种方式
+                    if hide_author:
+                        # 检查是否是媒体组
+                        msg = batch[0]
+                        media_group_id = getattr(msg, 'media_group_id', None)
                         
-                        # 检查是否需要隐藏作者
-                        if hide_author:
-                            # 检查批次中的消息是否都属于同一个媒体组
-                            media_group_id = batch[0].media_group_id if batch and hasattr(batch[0], 'media_group_id') else None
-                            
-                            # 如果是媒体组且所有消息都属于同一媒体组，使用copy_media_group
-                            if (media_group_id and 
-                                all(hasattr(msg, 'media_group_id') and msg.media_group_id == media_group_id for msg in batch)):
-                                try:
-                                    # 使用copy_media_group批量复制媒体组
-                                    batch_forwarded = await self.client.copy_media_group(
-                                        chat_id=to_chat_actual,
-                                        from_chat_id=from_chat_actual,
-                                        message_id=batch[0].id
-                                    )
-                                    
-                                    # 添加代码更新转发成功消息计数
-                                    total_success_messages += len(batch_forwarded)
-                                    
-                                    # 日志输出已经在forward_media_messages中处理，这里不重复输出
-                                    
-                                except Exception as e:
-                                    # 改进错误日志
-                                    error_msg = str(e)
-                                    if "USERNAME_NOT_OCCUPIED" in error_msg:
-                                        logger.error(f"频道名不存在: {to_chat_id} - 请检查配置文件中的频道名称是否正确")
-                                    elif "Peer id invalid" in error_msg:
-                                        logger.error(f"频道ID解析错误: {to_chat_id} - 请确认频道是否存在")
-                                    elif "CHAT_FORWARDS_RESTRICTED" in error_msg:
-                                        logger.warning(f"频道转发限制: {to_chat_id} - 该频道禁止转发消息")
-                                    else:
-                                        # 简化错误输出但保留较多信息
-                                        if len(error_msg) > 100:
-                                            error_msg = error_msg[:100] + "..."
-                                        logger.error(f"转发到 {to_chat_id} 失败: {error_msg}")
-                                    
-                                    batch_forwarded = []
-                                    # 如果媒体组转发失败，回退到逐条复制
-                                    for msg in batch:
-                                        try:
-                                            forwarded = await self.client.copy_message(
-                                                chat_id=to_chat_actual,
-                                                from_chat_id=from_chat_actual,
-                                                message_id=msg.id
-                                            )
-                                            batch_forwarded.append(forwarded)
-                                            total_success_messages += 1  # 更新成功计数
-                                        except Exception as inner_e:
-                                            inner_error = str(inner_e)
-                                            # 只记录第一个错误，避免过多日志
-                                            if msg == batch[0]:
-                                                if "USERNAME_NOT_OCCUPIED" in inner_error:
-                                                    logger.error(f"单条转发失败: 频道名不存在 {to_chat_id}")
-                                                elif "CHAT_FORWARDS_RESTRICTED" in inner_error:
-                                                    logger.warning(f"单条转发失败: 频道 {to_chat_id} 禁止转发")
-                                                else:
-                                                    logger.warning(f"单条转发失败: {inner_error[:50]}...")
-                            else:
-                                # 不是媒体组或不同媒体组，逐条复制消息
-                                for msg in batch:
-                                    try:
-                                        forwarded = await self.client.copy_message(
-                                            chat_id=to_chat_actual,
-                                            from_chat_id=from_chat_actual,
-                                            message_id=msg.id
-                                        )
-                                        batch_forwarded.append(forwarded)
-                                        total_success_messages += 1  # 更新成功计数
-                                    except Exception as e:
-                                        # 不输出每个消息的错误
-                                        pass
+                        if media_group_id and all(getattr(m, 'media_group_id', None) == media_group_id for m in batch):
+                            # 整体复制媒体组
+                            batch_result = await self._copy_media_group(from_chat_actual, to_chat_actual, batch[0].id)
                         else:
-                            # 不隐藏作者，使用转发保留原始格式
-                            message_ids = [msg.id for msg in batch]
-                            
-                            # 使用Pyrogram的forward_messages方法
-                            batch_forwarded = await self.client.forward_messages(
-                                chat_id=to_chat_id,
-                                from_chat_id=from_chat_id,
-                                message_ids=message_ids
-                            )
-                            total_success_messages += len(batch_forwarded)  # 更新成功计数
-                        
-                        # 将转发成功的消息添加到结果列表
-                        forwarded_messages.extend(batch_forwarded)
-                        
-                        # 不输出每个批次的详情
-                            
-                    except FloodWait as e:
-                        logger.warning(f"转发受限，等待 {e.value} 秒后重试")
-                        
-                        # 使用tqdm显示等待倒计时
-                        if TQDM_AVAILABLE:
-                            wait_desc = "等待限制解除"
-                            with tqdm(total=e.value, desc=wait_desc, unit="秒", 
-                                     bar_format=WAIT_BAR_FORMAT,
-                                     colour='red') as wait_pbar:
-                                for _ in range(e.value):
-                                    await asyncio.sleep(1)
-                                    wait_pbar.update(1)
-                        else:
-                            await asyncio.sleep(e.value)
-                        
-                        # 重试
+                            # 逐条复制消息
+                            batch_result = await self._copy_messages(from_chat_actual, to_chat_actual, batch)
+                    else:
+                        # 使用直接转发
                         message_ids = [msg.id for msg in batch]
-                        batch_forwarded = await self.client.forward_messages(
-                            chat_id=to_chat_id,
-                            from_chat_id=from_chat_id,
+                        batch_result = await self.client.forward_messages(
+                            chat_id=to_chat_actual,
+                            from_chat_id=from_chat_actual,
                             message_ids=message_ids
                         )
-                        forwarded_messages.extend(batch_forwarded)
-                        # 不输出重试信息
                     
-                    except Exception as e:
-                        # 简化错误输出
-                        error_msg = str(e)
-                        if len(error_msg) > 50:
-                            error_msg = error_msg[:50] + "..."
-                        logger.error(f"转发失败: {error_msg}")
-                        # 继续尝试其他批次，不立即返回
+                    # 处理结果
+                    if batch_result:
+                        forwarded_messages.extend(batch_result if isinstance(batch_result, list) else [batch_result])
+                        total_success += len(batch_result) if isinstance(batch_result, list) else 1
                         
-                    # 批次之间添加短暂延迟，避免触发频率限制
-                    if i < len(batches) - 1:
-                        await asyncio.sleep(1)
+                    # 批次间添加短暂延迟，避免频率限制
+                    if batch_idx < len(batches) - 1:
+                        await asyncio.sleep(0.5)
+                        
+                except FloodWait as e:
+                    logger.warning(f"转发受限，等待 {e.value} 秒后重试")
+                    await asyncio.sleep(e.value)
                     
-                    # 更新批次发送进度条
-                    if TQDM_AVAILABLE and forward_pbar:
-                        forward_pbar.update(1)
+                    # 重试
+                    message_ids = [msg.id for msg in batch]
+                    retry_result = await self.client.forward_messages(
+                        chat_id=to_chat_actual,
+                        from_chat_id=from_chat_actual,
+                        message_ids=message_ids
+                    )
+                    
+                    if retry_result:
+                        forwarded_messages.extend(retry_result if isinstance(retry_result, list) else [retry_result])
+                        total_success += len(retry_result) if isinstance(retry_result, list) else 1
+                except Exception as e:
+                    logger.error(f"转发批次 {batch_idx+1}/{len(batches)} 失败: {str(e)[:50]}")
             
-            # 输出最终转发结果
-            success_ratio = f"{total_success_messages}/{len(messages)}"
-            is_success = total_success_messages > 0
-            
+            # 返回结果
+            is_success = total_success > 0
             if is_success:
-                logger.info(f"频道转发成功: {from_chat_id} → {to_chat_id} ({success_ratio} 条消息)")
+                logger.info(f"转发成功: {from_chat_id} → {to_chat_id} ({total_success}/{len(messages)}条消息)")
             else:
-                logger.error(f"频道转发失败: {from_chat_id} → {to_chat_id}")
+                logger.error(f"转发失败: {from_chat_id} → {to_chat_id}")
                 
             return is_success, forwarded_messages
             
         except Exception as e:
-            logger.error(f"转发过程发生错误: {str(e)[:50]}...")
+            logger.error(f"转发过程出错: {str(e)[:50]}")
             return False, []
+            
+    async def _copy_media_group(self, from_chat_id: str, to_chat_id: str, message_id: int) -> List[Message]:
+        """复制媒体组"""
+        try:
+            return await self.client.copy_media_group(
+                chat_id=to_chat_id,
+                from_chat_id=from_chat_id,
+                message_id=message_id
+            )
+        except Exception as e:
+            error_msg = str(e)
+            if "USERNAME_NOT_OCCUPIED" in error_msg:
+                logger.error(f"频道名不存在: {to_chat_id}")
+            elif "CHAT_FORWARDS_RESTRICTED" in error_msg:
+                logger.warning(f"频道转发限制: {to_chat_id}")
+            else:
+                logger.error(f"复制媒体组失败: {error_msg[:50]}")
+            return []
+            
+    async def _copy_messages(self, from_chat_id: str, to_chat_id: str, messages: List[Message]) -> List[Message]:
+        """逐条复制消息"""
+        results = []
+        for msg in messages:
+            try:
+                copied = await self.client.copy_message(
+                    chat_id=to_chat_id,
+                    from_chat_id=from_chat_id,
+                    message_id=msg.id
+                )
+                if copied:
+                    results.append(copied)
+            except Exception:
+                # 单条失败继续处理下一条
+                pass
+        return results
     
-    async def send_to_all_channels(self, file_paths: List[str], preserve_format: bool = False, metadata_files: List[str] = None, parallel_channels: int = None) -> Dict[str, Any]:
+    async def send_to_all_channels(self, file_paths: List[str], preserve_format: bool = False, 
+                                 metadata_files: List[str] = None, parallel_channels: int = None) -> Dict[str, Any]:
         """
         按照优化流程发送媒体文件到所有目标频道:
         1. 先上传到me获取file_id
@@ -1014,6 +937,7 @@ class CustomMediaGroupSender:
         返回:
             Dict: 包含成功/失败统计和每个频道的消息列表
         """
+        # 初始化结果和检查参数
         start_time = time.time()
         results = {
             "success": 0,          # 成功发送的频道数
@@ -1021,7 +945,12 @@ class CustomMediaGroupSender:
             "messages_by_channel": {}  # 每个频道的消息列表
         }
         
-        # 如果未指定并行处理的频道数量，则从配置中读取
+        # 检查文件路径
+        if not file_paths:
+            logger.error("❌ 没有提供任何文件路径")
+            return results
+            
+        # 设置并行数量
         if parallel_channels is None:
             if isinstance(self.config_parser, configparser.ConfigParser):
                 if self.config_parser.has_section('UPLOAD'):
@@ -1031,9 +960,9 @@ class CustomMediaGroupSender:
             else:
                 parallel_channels = 3  # 默认值
         
-        logger.info(f"并行上传频道数量设置为: {parallel_channels}")
+        logger.info(f"并行上传频道数量: {parallel_channels}")
         
-        # 验证有效频道
+        # 验证频道
         valid_channels, invalid_channels, forward_status = await self.channel_validator.validate_channels(self.target_channels)
         # 更新转发状态缓存
         if forward_status:
@@ -1046,11 +975,12 @@ class CustomMediaGroupSender:
                 
         if not valid_channels:
             logger.error("❌ 没有有效的目标频道，上传被终止")
+            results["fail"] = len(self.target_channels)
             return results
             
         logger.info(f"🚀 开始处理 {len(file_paths)} 个文件到 {len(valid_channels)} 个频道")
         
-        # 第一步：上传到me获取file_id并组装媒体组件
+        # 第1步: 上传到me获取file_id并组装媒体组件
         logger.info("📤 步骤1：上传文件到'me'获取file_id")
         media_components = await self.first_upload_to_me(file_paths)
         if not media_components:
@@ -1058,7 +988,7 @@ class CustomMediaGroupSender:
             results["fail"] = len(valid_channels)
             return results
             
-        # 第二步：根据缓存的频道转发状态，找到第一个允许转发的频道
+        # 第2步: 找到适合的第一个频道作为转发源
         logger.info("🔍 步骤2：查找合适的第一个频道作为转发源")
         first_channel = None
         
@@ -1078,7 +1008,7 @@ class CustomMediaGroupSender:
                     if channel_str in self.actual_chat_ids:
                         actual_id = self.actual_chat_ids[channel_str]
                         # 验证ID格式是否正确
-                        if str(actual_id).startswith('-100') or (isinstance(actual_id, int) and actual_id < 0):
+                        if self._is_valid_chat_id_format(actual_id):
                             first_channel = channel
                             logger.info(f"✅ 找到允许转发的频道: {first_channel} (实际ID: {actual_id})")
                             break
@@ -1093,7 +1023,7 @@ class CustomMediaGroupSender:
                 channel_str = str(channel)
                 if channel_str in self.actual_chat_ids:
                     actual_id = self.actual_chat_ids[channel_str]
-                    if str(actual_id).startswith('-100') or (isinstance(actual_id, int) and actual_id < 0):
+                    if self._is_valid_chat_id_format(actual_id):
                         first_channel = channel
                         logger.warning(f"⚠️ 没有找到允许转发的频道，将使用: {first_channel} (实际ID: {actual_id})")
                         break
@@ -1107,7 +1037,7 @@ class CustomMediaGroupSender:
         first_channel_actual = self.get_actual_chat_id(first_channel)
         
         # 额外验证ID格式
-        if not (str(first_channel_actual).startswith('-100') or (isinstance(first_channel_actual, int) and first_channel_actual < 0)):
+        if not self._is_valid_chat_id_format(first_channel_actual):
             logger.error(f"❌ 第一个频道 {first_channel} 的ID格式不正确: {first_channel_actual}，流程终止")
             results["fail"] = len(valid_channels)
             return results
@@ -1120,102 +1050,156 @@ class CustomMediaGroupSender:
                 media=media_components
             )
             
-            if messages:
-                logger.info(f"✅ 成功发送到第一个频道 {first_channel}，共 {len(messages)} 条消息")
-                results["success"] += 1
-                results["messages_by_channel"][str(first_channel)] = messages
+            if not messages:
+                logger.error(f"❌ 发送到第一个频道 {first_channel} 失败: 未返回消息")
+                results["fail"] = len(valid_channels)
+                return results
                 
-                # 第三步：从第一个频道转发到其他频道
-                if len(valid_channels) > 1:
-                    logger.info("↪️ 步骤3：从第一个频道转发到其他频道")
-                    remaining_channels = [ch for ch in valid_channels if ch != first_channel]
+            logger.info(f"✅ 成功发送到第一个频道 {first_channel}，共 {len(messages)} 条消息")
+            results["success"] += 1
+            results["messages_by_channel"][str(first_channel)] = messages
+            
+            # 第3步: 从第一个频道转发到其他频道
+            if len(valid_channels) > 1:
+                logger.info("↪️ 步骤3：从第一个频道转发到其他频道")
+                remaining_channels = [ch for ch in valid_channels if ch != first_channel]
+                
+                # 使用缓存的转发状态判断是否可以转发
+                can_forward = self.channel_validator.get_forward_status(first_channel, True)
+                
+                if can_forward:
+                    # 可以使用转发，创建信号量控制并发数
+                    semaphore = asyncio.Semaphore(parallel_channels)
+                    tasks = []
                     
-                    # 使用缓存的转发状态，而不是重新检查
-                    can_forward = self.channel_validator.get_forward_status(first_channel, True)
-                    
-                    if can_forward:
-                        # 可以使用转发
-                        forward_source = first_channel_actual
-                        source_messages = messages
-                        
-                        # 转发到其他频道
-                        for target_channel in remaining_channels:
-                            # 获取目标频道的实际聊天ID
-                            target_channel_actual = self.get_actual_chat_id(target_channel)
-                                    
+                    # 定义并发转发函数
+                    async def forward_to_channel(channel):
+                        async with semaphore:
+                            target_id = self.get_actual_chat_id(channel)
+                            if not self._is_valid_chat_id_format(target_id):
+                                logger.error(f"❌ 目标频道 {channel} ID格式不正确: {target_id}")
+                                return False, None
+                                
+                            logger.info(f"↪️ 转发到 {channel}")
                             try:
-                                logger.info(f"↪️ 从 {forward_source} 转发到 {target_channel}")
-                                forward_result = await self.forward_media_messages(
-                                    from_chat_id=forward_source,
-                                    to_chat_id=target_channel_actual,
-                                    messages=source_messages,
+                                success, forwarded = await self.forward_media_messages(
+                                    from_chat_id=first_channel_actual,
+                                    to_chat_id=target_id,
+                                    messages=messages,
                                     hide_author=self.hide_author
                                 )
+                                return success, forwarded
+                            except Exception as e:
+                                logger.error(f"❌ 转发到 {channel} 失败: {str(e)}")
+                                return False, None
+                    
+                    # 为每个剩余频道创建任务
+                    for channel in remaining_channels:
+                        tasks.append(asyncio.create_task(forward_to_channel(channel)))
+                    
+                    # 等待所有任务完成并处理结果
+                    remaining_results = await asyncio.gather(*tasks, return_exceptions=True)
+                    
+                    # 处理转发结果
+                    for i, (channel, result) in enumerate(zip(remaining_channels, remaining_results)):
+                        if isinstance(result, Exception):
+                            logger.error(f"❌ 转发到 {channel} 时出错: {str(result)}")
+                            results["fail"] += 1
+                        elif isinstance(result, tuple) and len(result) == 2:
+                            success, forwarded = result
+                            if success:
+                                logger.info(f"✅ 成功转发到 {channel}")
+                                results["success"] += 1
+                                results["messages_by_channel"][str(channel)] = forwarded
+                            else:
+                                logger.error(f"❌ 转发到 {channel} 失败")
+                                results["fail"] += 1
+                        else:
+                            logger.error(f"❌ 转发到 {channel} 返回了意外结果")
+                            results["fail"] += 1
+                else:
+                    # 无法转发，需要发送副本
+                    logger.warning(f"⚠️ 源频道 {first_channel} 禁止转发，将使用复制消息方式")
+                    
+                    # 同样使用并发处理
+                    semaphore = asyncio.Semaphore(parallel_channels)
+                    tasks = []
+                    
+                    # 定义发送副本的函数
+                    async def copy_to_channel(channel):
+                        async with semaphore:
+                            target_id = self.get_actual_chat_id(channel)
+                            if not self._is_valid_chat_id_format(target_id):
+                                logger.error(f"❌ 目标频道 {channel} ID格式不正确: {target_id}")
+                                return False, None
                                 
-                                if forward_result[0]:  # 成功
-                                    results["success"] += 1
-                                    results["messages_by_channel"][str(target_channel)] = forward_result[1]
-                                    logger.info(f"✅ 转发到 {target_channel} 成功")
-                                else:
-                                    logger.error(f"❌ 转发到 {target_channel} 失败，尝试直接发送")
-                                    # 如果转发失败，尝试直接发送
-                                    direct_send = await self.client.send_media_group(
-                                        chat_id=target_channel_actual,
-                                        media=media_components
-                                    )
-                                    if direct_send:
-                                        results["success"] += 1
-                                        results["messages_by_channel"][str(target_channel)] = direct_send
-                                        logger.info(f"✅ 直接发送到 {target_channel} 成功")
-                                    else:
-                                        results["fail"] += 1
-                                        logger.error(f"❌ 无法发送到 {target_channel}")
-                            except Exception as e:
-                                results["fail"] += 1
-                                logger.error(f"❌ 转发到 {target_channel} 时出错: {str(e)}")
-                    else:
-                        # 不能使用转发，直接发送到每个目标频道
-                        logger.warning(f"⚠️ 第一个频道 {first_channel} 不允许转发，将直接发送到其他频道")
-                        for target_channel in remaining_channels:
-                            # 获取目标频道的实际聊天ID
-                            target_channel_actual = self.get_actual_chat_id(target_channel)
-                                    
+                            logger.info(f"📋 复制到 {channel}")
                             try:
-                                logger.info(f"📤 直接发送到 {target_channel}")
-                                direct_send = await self.client.send_media_group(
-                                    chat_id=target_channel_actual,
-                                    media=media_components
-                                )
-                                if direct_send:
-                                    results["success"] += 1
-                                    results["messages_by_channel"][str(target_channel)] = direct_send
-                                    logger.info(f"✅ 发送到 {target_channel} 成功")
+                                # 检查是否是媒体组
+                                if hasattr(messages[0], 'media_group_id') and messages[0].media_group_id:
+                                    copied = await self.client.copy_media_group(
+                                        chat_id=target_id,
+                                        from_chat_id=first_channel_actual,
+                                        message_id=messages[0].id
+                                    )
+                                    return True, copied
                                 else:
-                                    results["fail"] += 1
-                                    logger.error(f"❌ 发送到 {target_channel} 失败")
+                                    # 逐条复制普通消息
+                                    copied_msgs = []
+                                    for msg in messages:
+                                        copied = await self.client.copy_message(
+                                            chat_id=target_id,
+                                            from_chat_id=first_channel_actual,
+                                            message_id=msg.id
+                                        )
+                                        copied_msgs.append(copied)
+                                    return True, copied_msgs
                             except Exception as e:
+                                logger.error(f"❌ 复制到 {channel} 失败: {str(e)}")
+                                return False, None
+                    
+                    # 为每个剩余频道创建任务
+                    for channel in remaining_channels:
+                        tasks.append(asyncio.create_task(copy_to_channel(channel)))
+                    
+                    # 等待所有任务完成并处理结果
+                    copy_results = await asyncio.gather(*tasks, return_exceptions=True)
+                    
+                    # 处理复制结果
+                    for channel, result in zip(remaining_channels, copy_results):
+                        if isinstance(result, Exception):
+                            logger.error(f"❌ 复制到 {channel} 时出错: {str(result)}")
+                            results["fail"] += 1
+                        elif isinstance(result, tuple) and len(result) == 2:
+                            success, copied = result
+                            if success:
+                                logger.info(f"✅ 成功复制到 {channel}")
+                                results["success"] += 1
+                                results["messages_by_channel"][str(channel)] = copied
+                            else:
+                                logger.error(f"❌ 复制到 {channel} 失败")
                                 results["fail"] += 1
-                                logger.error(f"❌ 发送到 {target_channel} 时出错: {str(e)}")
-            else:
-                logger.error(f"❌ 发送到第一个频道 {first_channel} 失败")
-                results["fail"] += len(valid_channels)
+                        else:
+                            logger.error(f"❌ 复制到 {channel} 返回了意外结果")
+                            results["fail"] += 1
         except Exception as e:
-            logger.error(f"❌ 发送到第一个频道 {first_channel} 时出错: {str(e)}")
-            results["fail"] += len(valid_channels)
-                
-        # 统计结果
-        elapsed_time = time.time() - start_time
+            logger.error(f"❌ 发送到第一个频道 {first_channel} 失败: {str(e)}")
+            results["fail"] = len(valid_channels)
+            
+        # 计算总耗时
+        elapsed_time = time.time() - start_time        
         logger.info(f"✅ 全部完成! 成功: {results['success']}/{len(valid_channels)}，耗时: {elapsed_time:.2f}秒")
             
         return results
 
     async def validate_channels(self) -> List[str]:
         """
-        验证目标频道是否存在且有权限 (使用新的ChannelValidator)
+        验证目标频道是否存在且有权限
         
         返回:
             List[str]: 有效的目标频道列表
         """
+        # 验证频道并更新状态
         valid_channels, invalid_channels, forward_status = await self.channel_validator.validate_channels(self.target_channels)
         
         # 更新转发状态缓存
@@ -1223,7 +1207,10 @@ class CustomMediaGroupSender:
             self.channel_forward_status.update(forward_status)
             
         # 预加载频道ID
-        await self.preload_channel_ids(valid_channels)
+        if valid_channels:
+            await self.preload_channel_ids(valid_channels)
+        else:
+            logger.warning("没有有效的目标频道")
                 
         return valid_channels
         
@@ -1234,118 +1221,138 @@ class CustomMediaGroupSender:
         参数:
             channels: 频道标识符列表
         """
+        if not channels:
+            logger.info("没有频道需要预加载")
+            return
+            
         logger.info(f"预加载 {len(channels)} 个频道的ID信息...")
         
-        # 存储获取失败的频道列表，用于后续重试
-        failed_channels = []
+        # 检查已缓存ID数量
+        cached_count = sum(1 for ch in channels if str(ch) in self.actual_chat_ids)
+        if cached_count > 0:
+            logger.info(f"✓ 已有 {cached_count}/{len(channels)} 个频道ID在缓存中")
         
-        # 先尝试加载已知数字格式的ID
+        # 处理数字格式ID
+        numeric_channels = []
+        non_numeric_channels = []
+        
         for channel in channels:
             channel_str = str(channel)
             # 如果channel本身就是数字ID，直接使用
             if channel_str.startswith('-100') or (channel_str.isdigit() and len(channel_str) > 6):
                 self.actual_chat_ids[channel_str] = channel
-                logger.info(f"✅ 识别到数字格式的频道ID: {channel}")
+                numeric_channels.append(channel)
             else:
-                failed_channels.append(channel)
+                non_numeric_channels.append(channel)
         
-        # 然后对非数字ID的频道，遍历尝试获取ID
-        for channel in failed_channels[:]:  # 使用副本遍历，以便可以在循环中修改原列表
-            try:
-                # 尝试通过不同方式获取频道信息，优先使用get_chat
+        if numeric_channels:
+            logger.info(f"✓ 识别到 {len(numeric_channels)} 个数字格式的频道ID")
+            
+        # 处理私有频道链接，尝试从已有缓存匹配
+        private_channels = []
+        remaining_channels = []
+        
+        for channel in non_numeric_channels:
+            channel_str = str(channel)
+            # 检查是否是私有频道链接
+            if isinstance(channel, str) and ('t.me/+' in channel or channel.startswith('+')):
+                # 尝试从channel_forward_status中的键匹配
+                match_found = False
+                for stored_key in self.channel_forward_status.keys():
+                    stored_key_str = str(stored_key)
+                    # 如果存储的键是数字ID，且有对应的私有链接缓存
+                    if stored_key_str.startswith('-100'):
+                        for cached_key, cached_id in self.actual_chat_ids.items():
+                            if str(cached_id) == stored_key_str and isinstance(cached_key, str) and '+' in cached_key:
+                                # 比较链接部分
+                                link_part1 = channel_str.split('+')[-1].split('/')[0]
+                                link_part2 = cached_key.split('+')[-1].split('/')[0]
+                                if link_part1 == link_part2:
+                                    self.actual_chat_ids[channel_str] = stored_key
+                                    logger.info(f"✓ 为私有链接 {channel_str} 匹配到ID: {stored_key}")
+                                    match_found = True
+                                    break
+                if match_found:
+                    private_channels.append(channel)
+                else:
+                    remaining_channels.append(channel)
+            else:
+                remaining_channels.append(channel)
+                
+        if private_channels:
+            logger.info(f"✓ 处理了 {len(private_channels)} 个私有频道链接")
+        
+        # 对剩余频道使用API加载
+        if remaining_channels:
+            logger.info(f"⏳ 正在通过API获取 {len(remaining_channels)} 个频道的ID...")
+            
+            for channel in remaining_channels:
                 try:
-                    # 方法1：直接使用get_chat
-                    chat = await self.client.get_chat(channel)
-                    
+                    await self._resolve_channel_id_with_validator_async(channel)
+                except KeyboardInterrupt:
+                    logger.warning("⚠️ 用户中断操作")
+                    raise
+                except Exception as e:
+                    logger.warning(f"⚠️ 获取频道 {channel} ID失败: {str(e)}")
+                    # 失败时使用原始值
+                    self.actual_chat_ids[str(channel)] = channel
+        
+        logger.info(f"✅ 完成 {len(self.actual_chat_ids)} 个频道ID的预加载")
+    
+    async def _resolve_channel_id_with_validator_async(self, channel) -> str:
+        """
+        使用验证器异步解析频道ID
+        
+        参数:
+            channel: 频道标识符
+            
+        返回:
+            str: 实际的频道ID
+        """
+        channel_str = str(channel)
+        
+        try:
+            # 方法1: 直接使用get_chat
+            chat = await self.client.get_chat(channel)
+            
+            if chat and hasattr(chat, 'id'):
+                actual_id = chat.id
+                self.actual_chat_ids[channel_str] = actual_id
+                logger.info(f"✅ 已获取频道 {channel_str} 的实际ID: {actual_id}")
+                
+                # 如果是私有频道链接，同时保存链接形式的键
+                if isinstance(channel, str) and ('t.me/+' in channel or channel.startswith('+')):
+                    self.actual_chat_ids[channel] = actual_id
+                
+                return actual_id
+        except Exception as e1:
+            # 尝试备用方法
+            try:
+                # 方法2: 对于公开频道，尝试解析用户名
+                if isinstance(channel, str) and 't.me/' in channel and '+' not in channel:
+                    username = channel.split('t.me/')[1].split('/')[0]
+                    chat = await self.client.get_chat(f"@{username}")
                     if chat and hasattr(chat, 'id'):
                         actual_id = chat.id
-                        self.actual_chat_ids[str(channel)] = actual_id
-                        logger.info(f"✅ 已缓存频道 {channel} 的实际ID: {actual_id}")
-                        
-                        # 如果是私有频道链接，同时保存链接形式的键
-                        if isinstance(channel, str) and ('t.me/+' in channel or channel.startswith('+')):
-                            self.actual_chat_ids[channel] = actual_id
-                            logger.info(f"✅ 已为私有频道链接 {channel} 缓存实际ID: {actual_id}")
-                        
-                        # 从失败列表中移除
-                        failed_channels.remove(channel)
-                        continue
-                except Exception as e1:
-                    logger.warning(f"⚠️ 使用get_chat获取频道 {channel} ID失败: {str(e1)}")
-                
-                # 方法2：对于公开频道，尝试解析用户名方式
-                if isinstance(channel, str) and 't.me/' in channel and '+' not in channel:
-                    try:
-                        # 尝试解析用户名
-                        if 't.me/' in channel:
-                            username = channel.split('t.me/')[1].split('/')[0]
-                            # 尝试获取带@的用户名
-                            chat = await self.client.get_chat(f"@{username}")
-                            if chat and hasattr(chat, 'id'):
-                                actual_id = chat.id
-                                self.actual_chat_ids[str(channel)] = actual_id
-                                logger.info(f"✅ 已通过用户名 @{username} 获取频道 {channel} 的实际ID: {actual_id}")
-                                
-                                # 从失败列表中移除
-                                failed_channels.remove(channel)
-                                continue
-                    except Exception as e2:
-                        logger.warning(f"⚠️ 使用用户名方式获取频道 {channel} ID失败: {str(e2)}")
-                        
-                # 方法3：尝试获取消息历史并提取频道ID
+                        self.actual_chat_ids[channel_str] = actual_id
+                        logger.info(f"✅ 已通过用户名 @{username} 获取频道ID: {actual_id}")
+                        return actual_id
+            except Exception:
+                # 尝试最后一种方法
                 try:
+                    # 方法3: 获取消息历史
                     messages = await self.client.get_chat_history(channel, limit=1)
                     if messages:
                         chat_id = messages[0].chat.id
-                        self.actual_chat_ids[str(channel)] = chat_id
-                        logger.info(f"✅ 通过历史消息获取频道 {channel} 的实际ID: {chat_id}")
-                        
-                        # 从失败列表中移除
-                        if channel in failed_channels:
-                            failed_channels.remove(channel)
-                            continue
+                        self.actual_chat_ids[channel_str] = chat_id
+                        logger.info(f"✅ 通过历史消息获取频道ID: {chat_id}")
+                        return chat_id
                 except Exception as e3:
-                    logger.warning(f"⚠️ 通过历史消息获取频道 {channel} ID失败: {str(e3)}")
-            
-            except KeyboardInterrupt:
-                # 允许用户中断
-                logger.warning("⚠️ 用户中断操作")
-                raise
-            except Exception as e:
-                logger.warning(f"⚠️ 所有方法获取频道 {channel} ID都失败: {str(e)}")
-                # 失败的情况下保持默认值
-                self.actual_chat_ids[str(channel)] = channel
+                    logger.warning(f"⚠️ 所有方法获取频道 {channel} ID都失败")
+                    raise e3
         
-        # 检查是否所有频道都已经获取到ID
-        if failed_channels:
-            logger.warning(f"⚠️ 仍有 {len(failed_channels)} 个频道无法获取ID: {', '.join(failed_channels)}")
-            
-            # 尝试从forward_status复制现有ID
-            logger.info("尝试从channel_forward_status中查找匹配项...")
-            for channel in failed_channels:
-                channel_str = str(channel)
-                # 尝试进行部分匹配
-                for stored_key in self.channel_forward_status.keys():
-                    stored_key_str = str(stored_key)
-                    # 检查是否有相似部分，例如包含相同的频道名
-                    if 't.me/' in channel_str and 't.me/' in stored_key_str:
-                        ch_name1 = channel_str.split('t.me/')[1].split('/')[0].lower()
-                        ch_name2 = stored_key_str.split('t.me/')[1].split('/')[0].lower()
-                        
-                        if ch_name1 == ch_name2 or ch_name1 in ch_name2 or ch_name2 in ch_name1:
-                            # 查看stored_key是否有对应的ID
-                            if stored_key_str in self.actual_chat_ids:
-                                self.actual_chat_ids[channel_str] = self.actual_chat_ids[stored_key_str]
-                                logger.info(f"✅ 通过匹配复制ID: {channel_str} -> {self.actual_chat_ids[stored_key_str]}")
-                            elif stored_key_str.startswith('-100'):
-                                # stored_key本身就是ID
-                                self.actual_chat_ids[channel_str] = stored_key
-                                logger.info(f"✅ 使用已有ID: {channel_str} -> {stored_key}")
-        
-        logger.info(f"✅ 完成 {len(self.actual_chat_ids)} 个频道ID的预加载")
-        # 打印所有成功获取的频道ID，便于调试
-        for channel, channel_id in self.actual_chat_ids.items():
-            logger.info(f"📋 频道映射: {channel} -> {channel_id}")
+        # 如果所有方法都失败，使用原始值
+        return channel
 
     def get_actual_chat_id(self, channel: str) -> str:
         """
@@ -1357,107 +1364,80 @@ class CustomMediaGroupSender:
         返回:
             str: 实际的聊天ID
         """
-        # 如果是None或空字符串，直接返回
+        # 处理空值或None
         if not channel:
             return channel
             
-        # 统一转为字符串用于查找
+        # 统一转为字符串处理
         channel_str = str(channel)
         
-        # 如果已经缓存，直接返回
+        # 检查缓存
         if channel_str in self.actual_chat_ids:
             chat_id = self.actual_chat_ids[channel_str]
-            # 检查缓存的ID格式
-            if isinstance(chat_id, int) or (isinstance(chat_id, str) and (chat_id.startswith('-100') or chat_id.isdigit())):
-                # ID格式正确
-                logger.debug(f"✓ 频道 {channel_str} 使用缓存ID: {chat_id}")
+            # 验证缓存的ID格式
+            if self._is_valid_chat_id_format(chat_id):
                 return chat_id
-            else:
-                # 如果缓存的不是有效的ID格式，尝试从其他缓存中找
-                logger.warning(f"⚠️ 频道 {channel_str} 缓存的ID格式不正确: {chat_id}，尝试查找其他匹配项")
-            
+        
         # 如果是数字ID格式，直接返回
-        if channel_str.startswith('-100') or (channel_str.isdigit() and len(channel_str) > 6):
-            self.actual_chat_ids[channel_str] = channel  # 缓存起来
-            logger.debug(f"✓ 频道 {channel_str} 是数字ID格式: {channel}")
+        if self._is_valid_chat_id_format(channel_str):
+            self.actual_chat_ids[channel_str] = channel_str  # 缓存起来
             return channel_str
             
-        # 处理频道URL
-        if isinstance(channel, str) and 't.me/' in channel:
-            # 私有频道链接
-            if '+' in channel or 'joinchat' in channel:
-                # 查找是否有已知数字ID与该链接关联
-                for key, value in self.actual_chat_ids.items():
-                    # 检查value是否为数字格式的ID
-                    value_str = str(value)
-                    if value_str.startswith('-100') or (value_str.isdigit() and len(value_str) > 6):
-                        # 检查key中是否包含相同的私有链接部分
-                        if isinstance(key, str) and ('+' in key or 'joinchat' in key):
-                            link_part1 = channel.split('+')[-1].split('/')[0]  # 提取邀请码
-                            link_part2 = str(key).split('+')[-1].split('/')[0]
-                            if link_part1 == link_part2:
-                                logger.info(f"✅ 使用匹配的私有链接ID: {channel} -> {value}")
-                                self.actual_chat_ids[channel_str] = value
-                                return value
-            
-            # 公开频道链接
-            else:
-                # 提取用户名
-                try:
-                    username = channel.split('t.me/')[1].split('/')[0]
-                    # 查找是否已有相同用户名的频道ID
-                    for key, value in self.actual_chat_ids.items():
-                        if isinstance(key, str) and 't.me/' in key and '+' not in key:
-                            key_username = key.split('t.me/')[1].split('/')[0]
-                            if username.lower() == key_username.lower():
-                                logger.info(f"✅ 使用匹配的公开频道ID: {channel} -> {value}")
-                                self.actual_chat_ids[channel_str] = value
-                                return value
-                        # 也检查@格式
-                        elif isinstance(key, str) and key.startswith('@'):
-                            key_username = key[1:]
-                            if username.lower() == key_username.lower():
-                                logger.info(f"✅ 使用匹配的用户名ID: {channel} -> {value}")
-                                self.actual_chat_ids[channel_str] = value
-                                return value
-                except Exception as e:
-                    logger.warning(f"⚠️ 解析频道链接失败: {channel}, {str(e)}")
-        
-        # 如果是私有频道链接，尝试寻找对应的ID
+        # 如果是私有频道链接，尝试匹配
         if isinstance(channel, str) and ('t.me/+' in channel or channel.startswith('+')):
-            # 尝试从频道转发状态中寻找对应的实际ID
-            for stored_key, forward_status in self.channel_forward_status.items():
-                stored_key_str = str(stored_key)
-                # 检查是否为数字ID
-                if stored_key_str.startswith('-100'):
-                    # 检查该数字ID是否已关联到某个链接
-                    for cached_key, cached_value in self.actual_chat_ids.items():
-                        if str(cached_value) == stored_key_str and isinstance(cached_key, str) and ('+' in cached_key):
-                            # 进一步检查链接是否匹配
-                            link_part1 = channel.split('+')[-1].split('/')[0]
-                            link_part2 = cached_key.split('+')[-1].split('/')[0]
-                            if link_part1 == link_part2:
-                                logger.info(f"✅ 通过链接匹配找到ID: {channel} -> {stored_key}")
-                                self.actual_chat_ids[channel_str] = stored_key
-                                return stored_key
+            matched_id = self._find_matched_private_channel_id(channel)
+            if matched_id:
+                return matched_id
         
-        # 最后使用验证器获取，但确保返回有效格式的ID
-        logger.debug(f"? 频道 {channel_str} 未找到有效ID，使用验证器获取")
+        # 使用验证器获取实际ID
         try:
             actual_id = self.channel_validator.get_actual_chat_id(channel)
-            # 检查ID格式
             actual_id_str = str(actual_id)
-            if actual_id_str.startswith('-100') or (actual_id_str.isdigit() and len(actual_id_str) > 6):
-                # 有效的ID格式
+            
+            # 验证ID格式
+            if self._is_valid_chat_id_format(actual_id_str):
                 self.actual_chat_ids[channel_str] = actual_id
                 return actual_id
             else:
-                # 可能是用户名或其他非ID格式，使用原始值
-                logger.warning(f"⚠️ 验证器返回的ID格式不正确: {actual_id}，使用原始值 {channel}")
-                return channel
+                logger.warning(f"⚠️ 验证器返回的ID格式不正确: {actual_id}")
         except Exception as e:
-            logger.warning(f"⚠️ 获取频道ID时出错: {str(e)}，使用原始值 {channel}")
-            return channel
+            logger.warning(f"⚠️ 获取频道ID时出错: {str(e)}")
+            
+        # 无法获取有效ID，返回原始值
+        return channel
+    
+    def _is_valid_chat_id_format(self, chat_id) -> bool:
+        """检查是否是有效的聊天ID格式"""
+        chat_id_str = str(chat_id)
+        return (chat_id_str.startswith('-100') or 
+                (chat_id_str.isdigit() and len(chat_id_str) > 6) or
+                (isinstance(chat_id, int) and chat_id < 0))
+    
+    def _find_matched_private_channel_id(self, channel: str) -> Optional[str]:
+        """为私有频道链接寻找匹配的ID"""
+        channel_str = str(channel)
+        link_part = channel_str.split('+')[-1].split('/')[0]
+        
+        # 遍历channel_forward_status寻找匹配项
+        for stored_key, _ in self.channel_forward_status.items():
+            stored_key_str = str(stored_key)
+            
+            # 如果存储的键是数字ID
+            if stored_key_str.startswith('-100'):
+                # 检查该ID是否与某个私有链接关联
+                for cached_key, cached_id in self.actual_chat_ids.items():
+                    if (str(cached_id) == stored_key_str and 
+                        isinstance(cached_key, str) and 
+                        '+' in cached_key):
+                        
+                        cached_link_part = cached_key.split('+')[-1].split('/')[0]
+                        if link_part == cached_link_part:
+                            # 找到匹配，缓存并返回
+                            self.actual_chat_ids[channel_str] = stored_key
+                            logger.info(f"✓ 匹配到私有频道: {channel_str} -> {stored_key}")
+                            return stored_key
+                            
+        return None
 
     @classmethod
     async def upload_from_source_class(cls, config_path: str, downloaded_files: List[str], target_channels: List[str], 
@@ -1721,20 +1701,13 @@ class CustomMediaGroupSender:
         """
         start_time = time.time()
         
-        # 使用参数值或默认配置
-        if source_dir is None:
-            source_dir = self.config.get("source_dir") if isinstance(self.config, dict) else self.temp_folder
+        # 获取参数或使用默认值
+        source_dir = source_dir or self.config.get("source_dir", self.temp_folder)
+        filter_pattern = filter_pattern or self.config.get("filter_pattern", "*")
+        batch_size = batch_size or self.config.get("batch_size", 10)
+        max_workers = max_workers or self.config.get("max_concurrent_batches", 1)
         
-        if filter_pattern is None:
-            filter_pattern = self.config.get("filter_pattern", "*") if isinstance(self.config, dict) else "*"
-        
-        if batch_size is None:
-            batch_size = self.config.get("batch_size", 10) if isinstance(self.config, dict) else 10
-        
-        if max_workers is None:
-            max_workers = self.config.get("max_concurrent_batches", 1) if isinstance(self.config, dict) else 1
-        
-        # 检查源目录是否存在
+        # 参数校验
         if not os.path.exists(source_dir):
             logger.error(f"❌ 源目录不存在: {source_dir}")
             return {"success_flag": False, "error": f"源目录不存在: {source_dir}"}
@@ -1748,6 +1721,12 @@ class CustomMediaGroupSender:
         if not all_files:
             logger.warning(f"⚠️ 在目录 {source_dir} 中没有找到匹配的文件")
             return {"success_flag": True, "message": "没有找到匹配的文件", "uploaded_files": 0}
+            
+        # 验证频道
+        valid_channels = await self.validate_channels()
+        if not valid_channels:
+            logger.error("❌ 没有有效的目标频道")
+            return {"success_flag": False, "error": "没有有效的目标频道"}
             
         # 按批次分组文件
         batches = self.group_files_by_batch(all_files, batch_size)
@@ -1841,25 +1820,23 @@ class CustomMediaGroupSender:
         # 定义成功标志 - 只要有一个上传成功就算成功
         is_success = total_success > 0
         
-        if delete_after_upload:
-            # 不再判断是否全部成功，只要完成上传就删除文件
-            if total_success > 0:
-                logger.info("🗑️ 正在删除本地文件...")
-                
-                for batch_result in results_by_batch:
-                    batch_files = batch_result.get("files", [])
-                    for file_path in batch_files:
-                        try:
-                            if os.path.exists(file_path):
-                                os.remove(file_path)
-                                deleted_files += 1
-                                logger.debug(f"已删除文件: {os.path.basename(file_path)}")
-                        except Exception as e:
-                            logger.error(f"删除文件失败: {file_path}, 错误: {str(e)}")
-                
-                logger.info(f"✅ 已成功删除 {deleted_files}/{len(all_files)} 个本地文件")
-            else:
-                logger.warning("⚠️ 上传完全失败，本地文件未被删除")
+        if delete_after_upload and is_success:
+            logger.info("🗑️ 正在删除本地文件...")
+            
+            for batch_result in results_by_batch:
+                batch_files = batch_result.get("files", [])
+                for file_path in batch_files:
+                    try:
+                        if os.path.exists(file_path):
+                            os.remove(file_path)
+                            deleted_files += 1
+                            logger.debug(f"已删除文件: {os.path.basename(file_path)}")
+                    except Exception as e:
+                        logger.error(f"删除文件失败: {file_path}, 错误: {str(e)}")
+            
+            logger.info(f"✅ 已成功删除 {deleted_files}/{len(all_files)} 个本地文件")
+        elif delete_after_upload:
+            logger.warning("⚠️ 上传完全失败，本地文件未被删除")
         
         # 输出上传结果摘要
         print("\n" + "="*60)
