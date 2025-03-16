@@ -2,6 +2,104 @@
 频道链接解析模块，负责解析各种格式的频道链接
 """
 
+# =====================================
+# 使用示例
+# =====================================
+"""
+# 示例1: 解析不同格式的频道链接
+from tg_forwarder.channel_parser import ChannelParser
+
+# 1.1 解析公开频道用户名
+channel_id, message_id = ChannelParser.parse_channel("@telegram")
+# 返回: ('telegram', None)
+
+# 1.2 解析不带@的公开频道用户名
+channel_id, message_id = ChannelParser.parse_channel("telegram")
+# 返回: ('telegram', None)
+
+# 1.3 解析公开频道链接
+channel_id, message_id = ChannelParser.parse_channel("https://t.me/telegram")
+# 返回: ('telegram', None)
+
+# 1.4 解析带消息ID的公开频道链接
+channel_id, message_id = ChannelParser.parse_channel("https://t.me/telegram/10")
+# 返回: ('telegram', 10)
+
+# 1.5 解析私有频道链接
+channel_id, message_id = ChannelParser.parse_channel("https://t.me/c/1234567890/42")
+# 返回: (1234567890, 42)
+
+# 1.6 解析私有频道ID
+channel_id, message_id = ChannelParser.parse_channel("1234567890")
+# 返回: (1234567890, None)
+
+# 1.7 解析私有频道邀请链接
+channel_id, message_id = ChannelParser.parse_channel("https://t.me/+abcdefghijk")
+# 返回: ('https://t.me/+abcdefghijk', None)
+
+# 1.8 解析纯邀请码
+channel_id, message_id = ChannelParser.parse_channel("+abcdefghijk")
+# 返回: ('https://t.me/+abcdefghijk', None)
+
+# 示例2: 格式化频道标识符为友好显示格式
+from tg_forwarder.channel_parser import ChannelParser
+
+# 2.1 格式化公开频道用户名
+friendly_name = ChannelParser.format_channel_identifier("telegram")
+# 返回: '@telegram'
+
+# 2.2 格式化私有频道ID
+friendly_name = ChannelParser.format_channel_identifier(1234567890)
+# 返回: '私有频道(1234567890)'
+
+# 2.3 格式化私有频道邀请链接
+friendly_name = ChannelParser.format_channel_identifier("https://t.me/+abcdefghijk")
+# 返回: '私有频道(邀请链接)'
+
+# 示例3: 过滤频道列表，移除无效的频道标识符
+from tg_forwarder.channel_parser import ChannelParser
+
+channels = ["@telegram", "", "invalid#channel", "1234567890", "+abcdefgh"]
+filtered = ChannelParser.filter_channels(channels)
+# 返回: ['@telegram', '1234567890', '+abcdefgh'] (移除了空字符串和无效格式)
+
+# 示例4: 验证频道是否存在并检查转发权限 (需要客户端实例)
+import asyncio
+from tg_forwarder.client import TelegramClient
+from tg_forwarder.channel_parser import ChannelValidator
+
+async def validate_example():
+    # 初始化客户端
+    client = TelegramClient(api_config={...}, proxy_config={...})
+    await client.connect()
+    
+    # 创建验证器
+    validator = ChannelValidator(client)
+    
+    # 4.1 验证单个频道
+    is_valid, error_msg, chat = await validator.validate_channel("@telegram")
+    if is_valid:
+        print(f"频道有效: {chat.title}")
+        print(f"是否允许转发: {not chat.has_protected_content}")
+    else:
+        print(f"频道无效: {error_msg}")
+    
+    # 4.2 批量验证多个频道
+    channels = ["@telegram", "@durov", "invalid_channel"]
+    valid_channels, invalid_channels, forward_status = await validator.validate_channels(channels)
+    print(f"有效频道: {valid_channels}")
+    print(f"无效频道: {invalid_channels}")
+    
+    # 4.3 获取频道的转发状态
+    can_forward = validator.get_forward_status("@telegram")
+    print(f"频道是否允许转发: {can_forward}")
+    
+    await client.disconnect()
+
+# 运行异步示例
+# asyncio.run(validate_example())
+"""
+
 import re
 from typing import Optional, Tuple, Union, Dict, List, Any
 from urllib.parse import urlparse
