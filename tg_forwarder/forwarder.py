@@ -67,6 +67,16 @@ class MessageForwarder:
         
         return bool(emoji_pattern.search(text if text else ""))
     
+    def get_client_instance(self):
+        """
+        获取有效的客户端实例
+        
+        Returns:
+            有效的Pyrogram客户端实例
+        """
+        # 使用公共模块中的函数
+        return get_client_instance(self.client)
+    
     async def forward_message(self, source_message: Message, target_channels: List[Union[str, int]]) -> Dict[str, List[Optional[Message]]]:
         """
         转发单条消息到多个目标频道
@@ -215,64 +225,18 @@ class MessageForwarder:
             
         return results
     
-    async def process_messages(self, source_channel: Union[str, int], target_channels: List[Union[str, int]], 
-                             start_id: Optional[int] = None, end_id: Optional[int] = None) -> Dict[str, Any]:
+    def initialize_stats(self, start_id: int, end_id: int) -> Dict[str, Any]:
         """
-        处理并转发消息
+        初始化统计信息
         
         Args:
-            source_channel: 源频道ID或用户名
-            target_channels: 目标频道ID或用户名列表
             start_id: 起始消息ID
             end_id: 结束消息ID
-        
-        Returns:
-            Dict[str, Any]: 处理结果统计
-        """
-        # 设置默认的起始/结束消息ID
-        if not end_id or end_id <= 0:
-            # 获取最新消息ID
-            latest_id = await self.client.get_latest_message_id(source_channel)
-            if not latest_id:
-                logger.error(f"无法获取源频道的最新消息ID: {source_channel}")
-                return {"success": False, "error": "无法获取源频道的最新消息ID"}
             
-            end_id = latest_id
-            logger.info(f"已获取最新消息ID: {end_id}")
-        
-        if not start_id or start_id <= 0:
-            # 如果没有指定起始ID，使用默认值（最新消息ID - 8）
-            start_id = max(1, end_id - 8)
-            logger.info(f"未指定起始消息ID，将从ID={start_id}开始")
-        
-        logger.info(f"开始处理消息: 从 {start_id} 到 {end_id}")
-        
-        # 检查频道是否存在
-        source_entity = await self.client.get_entity(source_channel)
-        if not source_entity:
-            logger.error(f"源频道不存在或无法访问: {source_channel}")
-            return {"success": False, "error": f"源频道不存在或无法访问: {source_channel}"}
-        
-        # 获取真实的源频道ID
-        source_chat_id = source_entity.id
-        
-        # 检查目标频道是否存在并获取真实ID
-        valid_targets = []
-        for target in target_channels:
-            target_entity = await self.client.get_entity(target)
-            if target_entity:
-                # 保存真实的chat ID而不是原始标识符
-                valid_targets.append(target_entity.id)
-                logger.info(f"已找到目标频道: {getattr(target_entity, 'title', target)} (ID: {target_entity.id})")
-            else:
-                logger.warning(f"目标频道不存在或无法访问: {target}")
-        
-        if not valid_targets:
-            logger.error("没有有效的目标频道")
-            return {"success": False, "error": "没有有效的目标频道"}
-        
-        # 开始批量获取和转发消息
-        stats = {
+        Returns:
+            Dict[str, Any]: 统计信息字典
+        """
+        return {
             "total": end_id - start_id + 1,
             "processed": 0,
             "success": 0,
@@ -287,15 +251,24 @@ class MessageForwarder:
             "forwards_restricted": False,  # 标记源频道是否禁止转发
             "error_messages": []  # 记录错误消息
         }
+    
+    def group_messages(self, messages: List[Message]) -> Tuple[List[Tuple[str, Any]], Dict[str, Any]]:
+        """
+        对消息进行分组，将媒体组消息放在一起
         
-        # 获取消息
-        messages = await self.client.get_messages_range(
-            source_channel, start_id, end_id, self.batch_size
-        )
-        
-        # 先对消息进行分组，将媒体组消息放在一起
+        Args:
+            messages: 消息列表
+            
+        Returns:
+            Tuple[List[Tuple[str, Any]], Dict[str, Any]]: 
+            返回(分组后的消息列表, 统计信息)
+        """
         grouped_messages = []
         current_media_group = None
+        stats = {
+            "skipped": 0,
+            "skipped_emoji": 0
+        }
         
         for msg in messages:
             if msg is None:
@@ -331,10 +304,37 @@ class MessageForwarder:
         if current_media_group:
             grouped_messages.append(("media_group", current_media_group))
         
+        return grouped_messages, stats
+    
+    async def process_grouped_messages(self, grouped_messages: List[Tuple[str, Any]], 
+                                    valid_targets: List[Union[str, int]]) -> Tuple[Dict[str, List], Dict[str, Any]]:
+        """
+        处理分组后的消息
+        
+        Args:
+            grouped_messages: 分组后的消息列表
+            valid_targets: 有效的目标频道ID列表
+            
+        Returns:
+            Tuple[Dict[str, List], Dict[str, Any]]: 
+            返回(转发的消息字典, 统计信息)
+        """
         # 存储所有转发的消息
         forwarded_messages = defaultdict(list)
         # 存储所有源消息，以备后续下载使用
         source_messages = []
+        # 统计信息
+        stats = {
+            "processed": 0,
+            "success": 0,
+            "failed": 0,
+            "media_groups": 0,
+            "text_messages": 0,
+            "media_messages": 0,
+            "failed_messages": [],
+            "forwards_restricted": False,
+            "error_messages": []
+        }
         
         # 处理分组后的消息
         for msg_type, msg_data in grouped_messages:
@@ -366,7 +366,8 @@ class MessageForwarder:
                         if target != "error_messages" and target != "forwards_restricted":
                             forwarded_messages[target].extend(messages)
                     
-                    success = any(bool(msgs) for msgs in result.values())
+                    success = any(bool(msgs) for target, msgs in result.items() 
+                                 if target != "error_messages" and target != "forwards_restricted")
                     stats["processed"] += len(media_group)
                     if success:
                         stats["success"] += len(media_group)
@@ -408,7 +409,8 @@ class MessageForwarder:
                         if target != "error_messages" and target != "forwards_restricted":
                             forwarded_messages[target].extend(messages)
                     
-                    success = any(bool(msgs) for msgs in result.values())
+                    success = any(bool(msgs) for target, msgs in result.items() 
+                                 if target != "error_messages" and target != "forwards_restricted")
                     stats["processed"] += 1
                     if success:
                         stats["success"] += 1
@@ -446,23 +448,17 @@ class MessageForwarder:
                     # 保存源消息便于后续可能的处理
                     source_messages.append(msg_data)
         
-        # 计算总耗时
-        stats["end_time"] = time.time()
-        stats["duration"] = stats["end_time"] - stats["start_time"]
+        return dict(forwarded_messages), {"stats": stats, "source_messages": source_messages}
+    
+    def log_result_summary(self, stats: Dict[str, Any]) -> None:
+        """
+        记录结果摘要日志
         
-        # 设置成功标志和成功消息数量
-        # 使用success_count记录成功转发的消息数量
-        success_count = stats["success"]
-        # 设置success标志表示操作是否成功完成（不是消息数量）
-        stats["success_flag"] = True
-        
-        # 添加转发消息列表到结果中
-        stats["forwarded_messages"] = dict(forwarded_messages)
-        # 添加源消息列表到结果中
-        stats["source_messages"] = source_messages
-        
+        Args:
+            stats: 统计信息字典
+        """
         # 汇总一次性输出处理结果，避免重复日志
-        logger.info(f"消息处理完成: 总数 {stats['total']}, 处理 {stats['processed']}, 成功 {success_count}, 失败 {stats['failed']}, 跳过 {stats['skipped']}")
+        logger.info(f"消息处理完成: 总数 {stats['total']}, 处理 {stats['processed']}, 成功 {stats['success']}, 失败 {stats['failed']}, 跳过 {stats['skipped']}")
         if stats["skipped_emoji"] > 0:
             logger.info(f"跳过的Emoji消息数: {stats['skipped_emoji']}")
         if stats["failed"] > 0:
@@ -484,41 +480,149 @@ class MessageForwarder:
                     
                 # 如果错误信息超过5条，统计错误类型
                 if len(stats["error_messages"]) > 5:
-                    error_types = {}
-                    for msg in stats["error_messages"]:
-                        # 提取错误类型
-                        if "触发频率限制" in msg:
-                            error_type = "频率限制"
-                        elif "无权在目标频道" in msg:
-                            error_type = "权限不足"
-                        elif "ID无效" in msg:
-                            error_type = "频道ID无效"
-                        else:
-                            error_type = "其他错误"
-                        
-                        error_types[error_type] = error_types.get(error_type, 0) + 1
-                    
-                    # 输出错误类型统计
-                    logger.warning("错误类型统计:")
-                    for error_type, count in error_types.items():
-                        percentage = count / len(stats["error_messages"]) * 100
-                        logger.warning(f"  - {error_type}: {count}条 ({percentage:.1f}%)")
+                    self.log_error_types(stats["error_messages"])
         
         if stats["forwards_restricted"]:
-            logger.warning(f"源频道 {source_chat_id} 禁止转发消息，需要使用备用方式")
+            logger.warning(f"源频道禁止转发消息，需要使用备用方式")
         logger.info(f"耗时: {stats['duration']:.2f}秒")
-        
-        return stats
-
-    def get_client_instance(self):
+    
+    def log_error_types(self, error_messages: List[str]) -> None:
         """
-        获取有效的客户端实例
+        统计并记录错误类型
+        
+        Args:
+            error_messages: 错误消息列表
+        """
+        error_types = {}
+        for msg in error_messages:
+            # 提取错误类型
+            if "触发频率限制" in msg:
+                error_type = "频率限制"
+            elif "无权在目标频道" in msg:
+                error_type = "权限不足"
+            elif "ID无效" in msg:
+                error_type = "频道ID无效"
+            else:
+                error_type = "其他错误"
+            
+            error_types[error_type] = error_types.get(error_type, 0) + 1
+        
+        # 输出错误类型统计
+        logger.warning("错误类型统计:")
+        for error_type, count in error_types.items():
+            percentage = count / len(error_messages) * 100
+            logger.warning(f"  - {error_type}: {count}条 ({percentage:.1f}%)")
+    
+    async def validate_channels(self, source_channel: Union[str, int], target_channels: List[Union[str, int]]) -> Tuple[int, List[int], Dict[str, Any]]:
+        """
+        验证源频道和目标频道，获取真实的频道ID
+        
+        Args:
+            source_channel: 源频道ID或用户名
+            target_channels: 目标频道ID或用户名列表
+            
+        Returns:
+            Tuple[int, List[int], Dict[str, Any]]: 
+            返回(源频道ID, 有效的目标频道ID列表, 错误信息字典)
+        """
+        # 检查频道是否存在
+        source_entity = await self.client.get_entity(source_channel)
+        if not source_entity:
+            error_msg = f"源频道不存在或无法访问: {source_channel}"
+            logger.error(error_msg)
+            return None, [], {"success": False, "error": error_msg}
+        
+        # 获取真实的源频道ID
+        source_chat_id = source_entity.id
+        
+        # 检查目标频道是否存在并获取真实ID
+        valid_targets = []
+        for target in target_channels:
+            target_entity = await self.client.get_entity(target)
+            if target_entity:
+                # 保存真实的chat ID而不是原始标识符
+                valid_targets.append(target_entity.id)
+                logger.info(f"已找到目标频道: {getattr(target_entity, 'title', target)} (ID: {target_entity.id})")
+            else:
+                logger.warning(f"目标频道不存在或无法访问: {target}")
+        
+        if not valid_targets:
+            error_msg = "没有有效的目标频道"
+            logger.error(error_msg)
+            return source_chat_id, [], {"success": False, "error": error_msg}
+        
+        return source_chat_id, valid_targets, {}
+    
+    async def process_messages(self, source_channel: Union[str, int], target_channels: List[Union[str, int]], 
+                             start_id: Optional[int] = None, end_id: Optional[int] = None) -> Dict[str, Any]:
+        """
+        处理并转发消息
+        
+        Args:
+            source_channel: 源频道ID或用户名
+            target_channels: 目标频道ID或用户名列表
+            start_id: 起始消息ID
+            end_id: 结束消息ID
         
         Returns:
-            有效的Pyrogram客户端实例
-        
-        Raises:
-            ValueError: 如果找不到有效的客户端实例
+            Dict[str, Any]: 处理结果统计
         """
-        # 使用公共模块中的函数
-        return get_client_instance(self.client)
+        # 设置默认的起始/结束消息ID
+        if not end_id or end_id <= 0:
+            # 获取最新消息ID
+            latest_id = await self.client.get_latest_message_id(source_channel)
+            if not latest_id:
+                logger.error(f"无法获取源频道的最新消息ID: {source_channel}")
+                return {"success": False, "error": "无法获取源频道的最新消息ID"}
+            
+            end_id = latest_id
+            logger.info(f"已获取最新消息ID: {end_id}")
+        
+        if not start_id or start_id <= 0:
+            # 如果没有指定起始ID，使用默认值（最新消息ID - 8）
+            start_id = max(1, end_id - 8)
+            logger.info(f"未指定起始消息ID，将从ID={start_id}开始")
+        
+        logger.info(f"开始处理消息: 从 {start_id} 到 {end_id}")
+        
+        # 验证源频道和目标频道
+        source_chat_id, valid_targets, error = await self.validate_channels(source_channel, target_channels)
+        if error:
+            return error
+        
+        # 初始化统计信息
+        stats = self.initialize_stats(start_id, end_id)
+        
+        # 获取消息
+        messages = await self.client.get_messages_range(
+            source_channel, start_id, end_id, self.batch_size
+        )
+        
+        # 对消息进行分组
+        grouped_messages, group_stats = self.group_messages(messages)
+        
+        # 更新统计信息
+        stats.update(group_stats)
+        
+        # 处理分组后的消息
+        forwarded_messages, process_result = await self.process_grouped_messages(grouped_messages, valid_targets)
+        
+        # 更新统计信息
+        stats.update(process_result["stats"])
+        source_messages = process_result["source_messages"]
+        
+        # 计算总耗时
+        stats["end_time"] = time.time()
+        stats["duration"] = stats["end_time"] - stats["start_time"]
+        
+        # 设置成功标志
+        stats["success_flag"] = True
+        
+        # 添加转发消息列表和源消息列表到结果中
+        stats["forwarded_messages"] = forwarded_messages
+        stats["source_messages"] = source_messages
+        
+        # 记录结果摘要
+        self.log_result_summary(stats)
+        
+        return stats
