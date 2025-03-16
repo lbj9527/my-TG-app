@@ -181,11 +181,11 @@ class ForwardManager:
         for channel in sorted_targets:
             status = "允许转发" if channel_status.get(str(channel), True) else "禁止转发"
             logger.info(f"目标频道 {channel} 状态: {status}")
-            
+        
         return source_allow_forward, sorted_targets
     
     async def process_normal_forward(self, source_identifier: Union[str, int], target_identifiers: List[Union[str, int]], 
-                                  start_message_id: int, end_message_id: int) -> Dict[str, Any]:
+                                   start_message_id: int, end_message_id: int) -> Dict[str, Any]:
         """
         处理正常转发流程
         
@@ -211,7 +211,7 @@ class ForwardManager:
             await self.handle_forward_errors(result)
         else:
             logger.info("所有消息转发成功")
-            
+        
         return result
     
     async def handle_forward_errors(self, result: Dict[str, Any]) -> None:
@@ -228,7 +228,7 @@ class ForwardManager:
         # 仅记录失败的消息ID，不下载
         if failed_message_ids:
             logger.info(f"转发失败的消息ID: {', '.join(map(str, failed_message_ids[:10]))}" + 
-                       (f"... 等共 {len(failed_message_ids)} 条" if len(failed_message_ids) > 10 else ""))
+                      (f"... 等共 {len(failed_message_ids)} 条" if len(failed_message_ids) > 10 else ""))
         
         # 显示详细错误信息
         if "error_messages" in result and result["error_messages"]:

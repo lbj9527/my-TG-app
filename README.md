@@ -1,195 +1,201 @@
-# Telegram 频道消息转发工具
+# 日志系统优化说明
 
-这是一个基于 Pyrogram 的 Telegram 频道消息转发工具，能够自动从指定频道获取消息并将其转发到一个或多个目标频道。支持视频缩略图生成和自定义媒体组上传功能。
+## 日志系统特性
 
-## 功能特点
+日志系统经过全面优化，具有以下主要特性：
 
-- 支持从公开频道和私有频道获取消息
-- 支持指定消息 ID 范围的精确转发
-- 支持向多个目标频道同时转发
-- 支持多种消息类型（文本、图片、视频、文档等）
-- 支持视频自动生成缩略图并保存
-- 支持 SOCKS5/SOCKS4 代理设置
-- 自动处理连接中断和重试
-- 完善的日志记录系统
-- 媒体文件压缩优化和批量上传功能
+### 模块化设计
+- **进度条模块**：独立的 `progress.py` 支持创建和管理多个进度条
+- **日志过滤器**：`log_filter.py` 提供可自定义的日志过滤功能
+- **增强型日志记录器**：`logger.py` 集成了日志记录、进度条和过滤器功能
 
-## 使用方法
+### 增强的日志能力
+- 支持多种日志级别：TRACE、DEBUG、INFO、SUCCESS、WARNING、ERROR、CRITICAL
+- 支持为不同模块设置不同的日志级别
+- 通过过滤器实现对不需要的日志信息的过滤，保持控制台输出清晰
 
-1. 复制`config_example.ini`为`config.ini`并填写相关配置
-2. 运行`python main.py`开始转发
+### 进度条支持
+- 支持创建和管理多个进度条
+- 进度条显示完成百分比、处理速度和预估剩余时间
+- 日志输出不会干扰进度条显示
 
-## 安装依赖
+### 预设过滤器
+- FFmpeg 输出过滤器：自动过滤 FFmpeg 处理过程中的冗余输出
+- 系统日志过滤器：过滤不必要的系统级日志
+- Telegram API 过滤器：过滤 Telegram API 调试信息
 
-```bash
-pip install -r requirements.txt
-# 如需使用图片优化功能，还需安装：
-pip install pillow
+### 向后兼容性
+- 保留原有的 `setup_logger` 和 `get_logger` 函数，确保与现有代码无缝集成
+- 新旧接口可以混合使用，方便渐进式迁移
+
+## 使用示例
+
+### 基本日志使用
+
+```python
+from tg_forwarder.utils.logger import get_logger, setup_logger
+
+# 初始化日志系统
+setup_logger({
+    'level': 'DEBUG',
+    'file': 'logs/app.log'
+})
+
+# 获取日志记录器
+logger = get_logger('my_module')
+
+# 记录不同级别的日志
+logger.debug("这是一条调试日志")
+logger.info("这是一条信息日志")
+logger.success("这是一条成功日志")
+logger.warning("这是一条警告日志")
+logger.error("这是一条错误日志")
 ```
 
-## 转发流程详解
+### 使用进度条
 
-整个消息转发流程如下：
+```python
+from tg_forwarder.utils.logger import get_logger
 
-1. **初始化阶段**：
-   - 读取配置文件，验证API参数和频道设置
-   - 连接到Telegram服务器，验证频道是否存在和权限
-   - 创建必要的临时目录和日志文件
+logger = get_logger('downloader')
 
-2. **消息获取阶段**：
-   - 从源频道获取指定范围内的消息
-   - 按批次获取消息，避免API限制
-   - 对获取的消息进行筛选（根据配置跳过某些类型）
+# 创建进度条
+total_files = 100
+progress_bar = logger.create_progress_bar(
+    id="file_download", 
+    total=total_files, 
+    desc="下载文件"
+)
 
-3. **媒体处理阶段**：
-   - 检测消息是否包含媒体文件
-   - 如果需要，下载媒体文件到本地临时目录
-   - 为视频生成缩略图（如果启用）
-   - 对图片进行优化处理（如果启用）
+# 在处理过程中更新进度条
+for i in range(total_files):
+    # 处理文件...
+    
+    # 更新进度条
+    logger.update_progress("file_download", 1)
+    
+    # 可以在进度条显示的同时输出日志
+    if i % 20 == 0:
+        logger.info(f"已下载 {i} 个文件")
 
-4. **转发阶段**：
-   - 首先发送到第一个目标频道
-   - 检测第一个频道是否允许转发
-   - 如果允许，从第一个频道转发到其他频道
-   - 如果不允许，寻找其他可转发的频道或直接逐个发送
+# 关闭进度条
+logger.close_progress_bar("file_download")
+logger.success("所有文件下载完成！")
+```
 
-5. **并行处理**：
-   - 一次处理多个媒体组以提高效率
-   - 使用进度条显示总体进度和当前文件进度
-   - 自动处理API限制和延迟
+### 启用 FFmpeg 输出过滤
 
-6. **异常处理**：
-   - 自动重试网络错误或API限制
-   - 记录详细日志以便调试
-   - 在中断时提供恢复选项
+```python
+from tg_forwarder.utils.logger import get_logger
 
-## 配置项详细说明
+logger = get_logger('media_processor')
 
-配置文件（config.ini）包含以下各个部分的设置项：
+# 启用 FFmpeg 输出过滤
+logger.enable_ffmpeg_filter()
 
-### [API] - Telegram API 设置
+# FFmpeg 相关的输出会被自动过滤
+# 例如："frame=  100 fps=50.0 q=29.0 size=128kB time=00:00:10.00"
+```
 
-| 配置项         | 说明              | 取值范围                                | 默认值    |
-| -------------- | ----------------- | --------------------------------------- | --------- |
-| `api_id`       | Telegram API ID   | 整数，从 https://my.telegram.org 获取   | 无，必填  |
-| `api_hash`     | Telegram API Hash | 字符串，从 https://my.telegram.org 获取 | 无，必填  |
-| `phone_number` | 账号电话号码      | 字符串，带国家代码（如+8613800138000）  | 空 (可选) |
+### 多模块日志级别控制
 
-### [PROXY] - 代理设置
+```python
+from tg_forwarder.utils.logger import LogManager
 
-| 配置项       | 说明           | 取值范围                   | 默认值      |
-| ------------ | -------------- | -------------------------- | ----------- |
-| `enabled`    | 是否启用代理   | `True` 或 `False`          | `False`     |
-| `proxy_type` | 代理类型       | `SOCKS5`、`SOCKS4`、`HTTP` | `SOCKS5`    |
-| `addr`       | 代理服务器地址 | IP 地址或域名              | `127.0.0.1` |
-| `port`       | 代理服务器端口 | 1-65535                    | `1080`      |
-| `username`   | 代理认证用户名 | 字符串                     | 空 (可选)   |
-| `password`   | 代理认证密码   | 字符串                     | 空 (可选)   |
+# 全局配置
+LogManager.setup({
+    'level': 'INFO',
+    'file': 'logs/app.log'
+})
 
-### [CHANNELS] - 频道设置
+# 为不同模块设置不同的日志级别
+downloader_logger = LogManager.get_logger('downloader')
+uploader_logger = LogManager.get_logger('uploader')
 
-| 配置项            | 说明         | 取值范围                    | 默认值   |
-| ----------------- | ------------ | --------------------------- | -------- |
-| `source_channel`  | 源频道标识符 | 频道链接、用户名(@xxx)或 ID | 无，必填 |
-| `target_channels` | 目标频道列表 | 逗号分隔的多个频道标识符    | 无，必填 |
+# 全局启用 FFmpeg 过滤器
+LogManager.enable_ffmpeg_filter()
+```
 
-### [FORWARD] - 转发设置
+## 重构下载和上传模块的示例
 
-| 配置项                | 说明                    | 取值范围             | 默认值  |
-| --------------------- | ----------------------- | -------------------- | ------- |
-| `start_message_id`    | 起始消息 ID             | 整数，0 表示自动选择 | `0`     |
-| `end_message_id`      | 结束消息 ID             | 整数，0 表示最新消息 | `0`     |
-| `hide_author`         | 是否隐藏原作者          | `True` 或 `False`    | `False` |
-| `delay`               | 消息间转发延迟(秒)      | 浮点数，≥0           | `1.0`   |
-| `batch_size`          | 每批获取的消息数量      | 整数，1-100          | `50`    |
-| `skip_emoji_messages` | 是否跳过含 emoji 的消息 | `True` 或 `False`    | `False` |
+以下是将新日志系统集成到下载管理器的示例：
 
-### [MEDIA] - 媒体设置
+```python
+from tg_forwarder.utils.logger import get_logger
 
-| 配置项              | 说明                    | 取值范围          | 默认值  |
-| ------------------- | ----------------------- | ----------------- | ------- |
-| `skip_media`        | 是否跳过媒体文件        | `True` 或 `False` | `False` |
-| `enable_thumbnails` | 是否启用视频缩略图生成   | `True` 或 `False` | `True`  |
+class DownloadManager:
+    """文件下载管理器"""
+    
+    def __init__(self, config):
+        self.config = config
+        self.logger = get_logger('downloader')
+        # 启用 FFmpeg 输出过滤，避免大量进度输出
+        self.logger.enable_ffmpeg_filter()
+    
+    async def download_media(self, media_list):
+        """下载媒体文件列表"""
+        total = len(media_list)
+        self.logger.info(f"开始下载 {total} 个媒体文件")
+        
+        # 创建进度条
+        progress_bar = self.logger.create_progress_bar(
+            id="media_download",
+            total=total,
+            desc="下载媒体文件"
+        )
+        
+        for i, media in enumerate(media_list):
+            try:
+                # 下载单个文件
+                await self.download_file(media)
+                self.logger.update_progress("media_download", 1)
+            except Exception as e:
+                self.logger.error(f"下载文件失败: {str(e)}")
+        
+        self.logger.close_progress_bar("media_download")
+        self.logger.success(f"媒体下载完成，共 {total} 个文件")
+        
+    async def download_file(self, media):
+        """下载单个文件"""
+        # 下载逻辑...
+        pass
+```
 
-### [DOWNLOAD] - 下载设置
+## 日志系统配置选项
 
-| 配置项        | 说明               | 取值范围             | 默认值 |
-| ------------- | ------------------ | -------------------- | ------ |
-| `temp_folder` | 临时文件存储文件夹 | 有效文件路径         | `temp` |
-| `timeout`     | 下载超时时间(秒)   | 整数，≥1             | `300`  |
-| `chunk_size`  | 下载分块大小(字节) | 整数，推荐 4096-8192 | `4096` |
-| `enabled`     | 是否启用媒体下载   | `True` 或 `False`    | `True` |
+LogConfig 支持以下配置项：
 
-### [UPLOAD] - 上传设置
+| 参数 | 说明 | 默认值 |
+|------|------|---------|
+| level | 日志级别 | INFO |
+| file | 日志文件路径 | logs/app.log |
+| format | 日志格式 | default |
+| filters | 过滤器列表 | [] |
+| show_progress | 是否显示进度条 | True |
+| console_output | 是否输出到控制台 | True |
+| file_output | 是否输出到文件 | True |
+| rotation | 日志文件轮换设置 | 1 day |
+| retention | 日志保留时间 | 7 days |
+| compression | 日志压缩方式 | zip |
+| enqueue | 是否使用队列写入 | True |
+| colorize | 是否使用彩色输出 | True |
 
-| 配置项                   | 说明                   | 取值范围            | 默认值   |
-| ------------------------ | ---------------------- | ------------------- | -------- |
-| `enabled`                | 是否启用媒体上传       | `True` 或 `False`   | `True`   |
-| `upload_after_forward`   | 是否在转发后上传       | `True` 或 `False`   | `True`   |
-| `optimize_images`        | 是否优化图片以加快上传 | `True` 或 `False`   | `True`   |
-| `max_image_size`         | 图片最大尺寸(像素)     | 整数，建议 800-2000 | `1280`   |
-| `image_quality`          | 图片保存质量           | 整数，1-100         | `85`     |
-| `max_concurrent_batches` | 最大并发上传批次数     | 整数，建议 1-5      | `3`      |
-| `thumbnail_folder`       | 缩略图保存文件夹       | 有效文件路径        | `pic`    |
+## 升级说明
 
-### [LOG] - 日志设置
+该日志系统的升级主要集中在以下方面：
 
-| 配置项  | 说明         | 取值范围                                        | 默认值         |
-| ------- | ------------ | ----------------------------------------------- | -------------- |
-| `level` | 日志级别     | `DEBUG`、`INFO`、`WARNING`、`ERROR`、`CRITICAL` | `INFO`         |
-| `file`  | 日志文件路径 | 有效文件路径                                    | `logs/app.log` |
+1. **解耦合**：将进度条和日志过滤器分离成独立模块
+2. **易用性**：提供简洁的接口，使日志记录和进度展示更加方便
+3. **灵活性**：支持多种日志级别和过滤规则，适应不同场景
+4. **可扩展性**：采用模块化设计，便于未来功能扩展
 
-## 视频缩略图功能
+通过这些优化，日志系统不仅提供了更清晰的输出，还能有效地跟踪各种操作的进度，大大提升了程序的用户体验和可维护性。
 
-当 `enable_thumbnails` 设置为 `True` 时，程序会为所有视频文件自动生成缩略图：
+## 推荐的重构实践
 
-1. 从视频中提取时长 25% 位置的帧作为缩略图
-2. 将缩略图调整到符合 Telegram 要求的尺寸（不超过 320 像素）
-3. 优化缩略图质量，确保大小不超过 200KB
-4. 缩略图会用于 Telegram 上传，同时保存在本地指定文件夹中
+对于现有的下载和上传模块，建议采取以下重构方式：
 
-**缩略图保存规则**：
-- 缩略图会保存在 `thumbnail_folder` 指定的文件夹中（默认为 `pic`）
-- 文件名格式为：`{原视频文件名}_{时间戳}.jpg`
-- 缩略图大小不超过 320 像素，同时保持原视频比例
-
-**注意事项**：
-- 此功能需要安装 moviepy 和 Pillow 库
-- 如果 moviepy 未安装，程序会自动降级（不生成缩略图）
-- 生成缩略图会略微增加处理时间，但显著提升用户体验
-
-## 图片优化说明
-
-当 `optimize_images` 设置为 `True` 时，程序会在上传前对图片进行优化，具体优化方式为：
-
-1. 限制图片的最大尺寸（由 `max_image_size` 控制）
-2. 调整图片的保存质量（由 `image_quality` 控制）
-
-这可以大幅提高上传速度，减少网络带宽使用。如果您的网络速度较慢，建议启用此功能。
-
-## 批量上传说明
-
-程序支持批量上传媒体文件，并可通过 `max_concurrent_batches` 控制并发上传的批次数：
-
-1. 媒体文件会按每 10 个一组进行分批
-2. 每批并发上传到所有目标频道
-3. 最多同时处理 `max_concurrent_batches` 个批次
-
-通过增加并发批次数可以提高上传速度，但也会增加网络和服务器负载。
-
-## 常见问题解决
-
-1. **导入错误: moviepy.editor**
-   - 安装 moviepy 库: `pip install moviepy`
-   - 如果安装后仍有问题，IDE 可能显示错误但程序仍能运行
-   - 可以使用 `# type: ignore` 注释来解决 IDE 警告
-
-2. **缩略图生成失败**
-   - 检查是否安装了 moviepy 和 Pillow
-   - 确保视频文件格式受支持（MP4, AVI, MOV 等常见格式）
-   - 尝试更新 ffmpeg: `pip install imageio-ffmpeg --upgrade`
-
-3. **上传速度慢**
-   - 增加 `max_concurrent_batches` 值（建议不超过 5）
-   - 启用图片优化功能 (`optimize_images=True`)
-   - 使用代理服务器提高连接速度（如有可用代理）
+1. **中心化日志过滤**：在日志系统中集中处理 FFmpeg 和系统日志的过滤，保持模块代码的清洁
+2. **统一进度显示**：使用日志系统的进度条功能，替代自定义的进度显示代码
+3. **模块化日志**：为每个功能模块创建独立的日志记录器，方便单独控制和查看
+4. **异常处理标准化**：统一异常处理和日志记录格式，提高调试效率

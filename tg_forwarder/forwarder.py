@@ -232,7 +232,7 @@ class MessageForwarder:
         Args:
             start_id: 起始消息ID
             end_id: 结束消息ID
-            
+        
         Returns:
             Dict[str, Any]: 统计信息字典
         """
@@ -251,7 +251,7 @@ class MessageForwarder:
             "forwards_restricted": False,  # 标记源频道是否禁止转发
             "error_messages": []  # 记录错误消息
         }
-    
+        
     def group_messages(self, messages: List[Message]) -> Tuple[List[Tuple[str, Any]], Dict[str, Any]]:
         """
         对消息进行分组，将媒体组消息放在一起
