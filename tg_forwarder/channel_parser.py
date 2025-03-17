@@ -118,15 +118,19 @@ class ChannelParseError(Exception):
 class ChannelValidator:
     """频道验证器，负责验证频道的有效性和可用性"""
     
-    def __init__(self, client: Client):
+    def __init__(self, client: Client, channel_state_manager=None):
         """
         初始化频道验证器
         
         Args:
             client: Pyrogram客户端实例
+            channel_state_manager: 频道状态管理器，如果为None则使用默认的缓存
         """
         self.client = client
+        # 旧的状态缓存，向后兼容
         self.channel_forward_status_cache = {}
+        # 新的状态管理器
+        self.channel_state_manager = channel_state_manager
     
     async def validate_channel(self, channel: str) -> Tuple[bool, str, Optional[Chat]]:
         """
@@ -158,10 +162,16 @@ class ChannelValidator:
             can_forward = True
             if hasattr(chat, 'has_protected_content') and chat.has_protected_content:
                 can_forward = False
+                # 更新状态
                 self.channel_forward_status_cache[str(channel)] = False
+                if self.channel_state_manager:
+                    self.channel_state_manager.set_forward_status(channel, False)
                 logger.info(f"频道验证成功: {channel} ({chat.title}) - 禁止转发 (has_protected_content=True)")
             else:
+                # 更新状态
                 self.channel_forward_status_cache[str(channel)] = True
+                if self.channel_state_manager:
+                    self.channel_state_manager.set_forward_status(channel, True)
                 logger.info(f"频道验证成功: {channel} ({chat.title}) - 允许转发 (has_protected_content=False)")
             
             return True, "", chat
@@ -235,6 +245,10 @@ class ChannelValidator:
                 
         # 更新缓存
         self.channel_forward_status_cache.update(forward_status)
+        # 同时更新状态管理器
+        if self.channel_state_manager:
+            for channel, status in forward_status.items():
+                self.channel_state_manager.set_forward_status(channel, status)
         
         return valid_channels, invalid_channels, forward_status
     
@@ -249,6 +263,10 @@ class ChannelValidator:
         Returns:
             bool: 是否允许转发
         """
+        # 首先尝试从状态管理器获取
+        if self.channel_state_manager:
+            return self.channel_state_manager.get_forward_status(channel, default)
+        # 向后兼容旧的缓存
         return self.channel_forward_status_cache.get(str(channel), default)
     
     def get_actual_chat_id(self, channel: str) -> str:

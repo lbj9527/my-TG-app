@@ -16,6 +16,7 @@ from tg_forwarder.channel_parser import ChannelParser, ChannelValidator
 from tg_forwarder.forwarder import MessageForwarder
 from tg_forwarder.utils.logger import setup_logger, get_logger
 from tg_forwarder.client import Client
+from tg_forwarder.channel_state import ChannelStateManager
 
 # 获取日志记录器
 logger = get_logger("manager")
@@ -35,7 +36,8 @@ class ForwardManager:
         self.client = None
         self.forwarder = None
         self.channel_validator = None
-        self.channel_forward_status = {}
+        # 替换为频道状态管理器
+        self.channel_state_manager = ChannelStateManager()
     
     async def setup(self) -> None:
         """初始化组件"""
@@ -49,8 +51,8 @@ class ForwardManager:
             # 连接到Telegram
             await self.client.connect()
             
-            # 创建频道验证器
-            self.channel_validator = ChannelValidator(self.client)
+            # 创建频道验证器，传递状态管理器
+            self.channel_validator = ChannelValidator(self.client, self.channel_state_manager)
             
             # 创建消息转发器
             forward_config = self.config.get_forward_config()
@@ -81,9 +83,9 @@ class ForwardManager:
         results = {}
         
         for channel_id in channels:
-            if str(channel_id) in self.channel_forward_status:
+            if self.channel_state_manager.is_cached(channel_id):
                 # 使用缓存结果
-                results[str(channel_id)] = self.channel_forward_status[str(channel_id)]
+                results[str(channel_id)] = self.channel_state_manager.get_forward_status(channel_id)
                 continue
                 
             try:
@@ -100,15 +102,15 @@ class ForwardManager:
                     allow_forward = True
                     logger.info(f"频道 {channel_id} 状态预检: ✓ 允许转发 (has_protected_content=False)")
                 
-                # 缓存结果
-                self.channel_forward_status[str(channel_id)] = allow_forward
+                # 保存状态到管理器
+                self.channel_state_manager.set_forward_status(channel_id, allow_forward)
                 results[str(channel_id)] = allow_forward
                 
             except Exception as e:
                 logger.warning(f"获取频道 {channel_id} 的保护内容状态失败: {str(e)[:100]}")
                 # 默认为允许转发
                 results[str(channel_id)] = True
-                self.channel_forward_status[str(channel_id)] = True
+                self.channel_state_manager.set_forward_status(channel_id, True)
         
         return results
     
@@ -169,17 +171,16 @@ class ForwardManager:
         channel_status = await self.check_channel_forward_status(all_channels)
         
         # 检查源频道是否允许转发
-        source_allow_forward = channel_status.get(str(source_identifier), True)
+        source_allow_forward = self.channel_state_manager.get_forward_status(source_identifier)
         
-        # 根据预检查结果排序目标频道，优先使用允许转发的频道
+        # 根据预检查结果排序目标频道，使用管理器的排序方法
         logger.info("根据转发状态对目标频道进行排序...")
-        # 将禁止转发的频道移到列表末尾
-        sorted_targets = sorted(target_identifiers, key=lambda x: 0 if channel_status.get(str(x), True) else 1)
+        sorted_targets = self.channel_state_manager.sort_channels_by_status(target_identifiers)
         
         # 记录排序后的频道状态
         logger.info(f"源频道 {source_identifier} 状态: {'允许转发' if source_allow_forward else '禁止转发'}")
         for channel in sorted_targets:
-            status = "允许转发" if channel_status.get(str(channel), True) else "禁止转发"
+            status = "允许转发" if self.channel_state_manager.get_forward_status(channel) else "禁止转发"
             logger.info(f"目标频道 {channel} 状态: {status}")
         
         return source_allow_forward, sorted_targets
@@ -293,8 +294,21 @@ class ForwardManager:
                     "success": 0,
                     "failed": 0,
                     "start_time": time.time(),
-                    "error": "源频道禁止转发消息，下载和上传功能已被移除，需要重新实现"
+                    "error": "源频道禁止转发消息，下载和上传功能正在重构中"
                 }
+                
+                # 未来可以在这里添加使用channel_state_manager来处理下载和上传的代码
+                # 例如：将channel_state_manager传递给下载器和上传器
+                # 如果重新导入了downloader和uploader模块，可以像这样使用：
+                # downloader = MediaDownloader(self.client, download_config)
+                # uploader = MediaGroupUploader(
+                #     client=client,
+                #     config_parser=config_parser,
+                #     target_channels=sorted_targets,
+                #     temp_folder=download_config['temp_folder'],
+                #     channel_state_manager=self.channel_state_manager,
+                #     message_metadata=downloader.message_metadata
+                # )
             
             # 计算总耗时
             result["end_time"] = time.time()
