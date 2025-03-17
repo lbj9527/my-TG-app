@@ -18,6 +18,13 @@ from tg_forwarder.utils.logger import setup_logger, get_logger
 from tg_forwarder.client import Client
 from tg_forwarder.channel_state import ChannelStateManager
 
+# 添加新导入的模块
+from tg_forwarder.taskQueue import TaskQueue
+from tg_forwarder.downloader.message_fetcher import MessageFetcher
+from tg_forwarder.downloader.media_downloader import MediaDownloader
+from tg_forwarder.uploader.assember import MessageAssembler
+from tg_forwarder.uploader.media_uploader import MediaUploader
+
 # 获取日志记录器
 logger = get_logger("manager")
 
@@ -294,21 +301,134 @@ class ForwardManager:
                     "success": 0,
                     "failed": 0,
                     "start_time": time.time(),
-                    "error": "源频道禁止转发消息，下载和上传功能正在重构中"
                 }
                 
-                # 未来可以在这里添加使用channel_state_manager来处理下载和上传的代码
-                # 例如：将channel_state_manager传递给下载器和上传器
-                # 如果重新导入了downloader和uploader模块，可以像这样使用：
-                # downloader = MediaDownloader(self.client, download_config)
-                # uploader = MediaGroupUploader(
-                #     client=client,
-                #     config_parser=config_parser,
-                #     target_channels=sorted_targets,
-                #     temp_folder=download_config['temp_folder'],
-                #     channel_state_manager=self.channel_state_manager,
-                #     message_metadata=downloader.message_metadata
-                # )
+                try:
+                    # 创建下载配置
+                    download_config = self.config.get_download_config()
+                    
+                    # 创建上传配置
+                    upload_config = self.config.get_upload_config()
+                    
+                    # 创建消息获取器
+                    message_fetcher = MessageFetcher(
+                        client=self.client,
+                        batch_size=forward_config.get('batch_size', 30)
+                    )
+                    
+                    # 创建媒体下载器
+                    media_downloader = MediaDownloader(
+                        client=self.client,
+                        concurrent_downloads=download_config["concurrent_downloads"],
+                        temp_folder=download_config["temp_folder"],
+                        retry_count=download_config["retry_count"],
+                        retry_delay=download_config["retry_delay"]
+                    )
+                    
+                    # 创建消息重组器
+                    message_assembler = MessageAssembler(
+                        metadata_path=os.path.join(download_config["temp_folder"], "message_metadata.json"),
+                        download_mapping_path=os.path.join(download_config["temp_folder"], "download_mapping.json")
+                    )
+                    
+                    # 创建媒体上传器
+                    media_uploader = MediaUploader(
+                        client=self.client,
+                        target_channels=sorted_targets,
+                        temp_folder=download_config["temp_folder"],
+                        wait_time=upload_config["wait_between_messages"],
+                        retry_count=upload_config["retry_count"] if "retry_count" in upload_config else download_config["retry_count"],
+                        retry_delay=upload_config["retry_delay"] if "retry_delay" in upload_config else download_config["retry_delay"]
+                    )
+                    
+                    # 创建任务队列
+                    task_queue = TaskQueue(max_queue_size=upload_config.get("concurrent_uploads", 3))
+                    
+                    logger.info("开始下载和上传任务...")
+                    
+                    # 定义生产者函数：获取消息并完成下载任务
+                    async def producer_func():
+                        try:
+                            # 获取并处理消息
+                            async for batch in message_fetcher.get_messages(
+                                source_identifier, 
+                                start_message_id, 
+                                end_message_id
+                            ):
+                                logger.info(f"获取到批次 {batch['id']}, 开始下载处理")
+                                
+                                # 下载媒体文件
+                                download_result = await media_downloader.download_media_batch(batch)
+                                
+                                # 将下载结果和原始批次一起加入队列
+                                if download_result.get("success", 0) > 0:
+                                    download_task = {
+                                        "batch_id": batch.get("id"),
+                                        "batch": batch,
+                                        "download_result": download_result,
+                                        "progress": batch.get("progress", 0)
+                                    }
+                                    
+                                    # 入队下载结果，等待上传
+                                    await task_queue.put(download_task)
+                                    logger.info(f"批次 {batch['id']} 下载完成并入队，等待上传，进度: {batch['progress']:.2f}%")
+                                else:
+                                    logger.warning(f"批次 {batch['id']} 下载失败或无内容，跳过上传")
+                        except Exception as e:
+                            logger.error(f"生产者(下载)任务出错: {str(e)}")
+                    
+                    # 定义消费者函数：只处理上传任务
+                    async def consumer_func(download_task):
+                        try:
+                            batch_id = download_task.get("batch_id")
+                            download_result = download_task.get("download_result")
+                            
+                            logger.info(f"开始处理批次 {batch_id} 的上传任务")
+                            
+                            # 重组消息
+                            assembled_data = message_assembler.assemble_batch(download_result.get("files", []))
+                            
+                            # 上传重组后的消息
+                            upload_result = await media_uploader.upload_batch(assembled_data)
+                            
+                            # 更新统计信息
+                            result["processed"] += upload_result.get("total_messages", 0)
+                            result["success"] += upload_result.get("success_total", 0)
+                            result["failed"] += upload_result.get("failed_total", 0)
+                            
+                            logger.info(f"批次 {batch_id} 上传完成，成功: {upload_result.get('success_total', 0)}，" +
+                                       f"失败: {upload_result.get('failed_total', 0)}")
+                            
+                            return {
+                                "batch_id": batch_id,
+                                "download": download_result,
+                                "upload": upload_result
+                            }
+                        except Exception as e:
+                            logger.error(f"消费者(上传)任务出错: {str(e)}")
+                            return False
+                    
+                    # 启动任务队列
+                    task_stats = await task_queue.start(
+                        producer_func=producer_func,
+                        consumer_func=consumer_func,
+                        num_consumers=upload_config.get("concurrent_uploads", 3)
+                    )
+                    
+                    # 更新结果统计
+                    result.update({
+                        "task_stats": task_stats,
+                        "error": None
+                    })
+                    
+                    logger.info(f"下载上传任务完成，总计处理: {result.get('processed')} 条，"
+                               f"成功: {result.get('success')} 条，失败: {result.get('failed')} 条")
+                
+                except Exception as e:
+                    logger.error(f"下载上传过程中发生错误: {str(e)}")
+                    import traceback
+                    logger.error(traceback.format_exc())
+                    result["error"] = f"下载上传过程中发生错误: {str(e)}"
             
             # 计算总耗时
             result["end_time"] = time.time()

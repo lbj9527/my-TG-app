@@ -97,29 +97,85 @@ class Config:
         }
     
     def get_forward_config(self) -> Dict[str, Any]:
-        """获取转发配置"""
-        forward_config = {
-            'start_message_id': self.config.getint('FORWARD', 'start_message_id', fallback=0),
-            'end_message_id': self.config.getint('FORWARD', 'end_message_id', fallback=0),
-            'hide_author': self.config.getboolean('FORWARD', 'hide_author', fallback=False),
-            'delay': self.config.getfloat('FORWARD', 'delay', fallback=1),
-            'batch_size': self.config.getint('FORWARD', 'batch_size', fallback=100),
-            'skip_emoji_messages': self.config.getboolean('FORWARD', 'skip_emoji_messages', fallback=False),
-        }
+        """
+        获取转发配置
+        
+        Returns:
+            Dict[str, Any]: 转发配置字典
+        """
+        forward_config = {}
+        
+        if 'FORWARD' in self.config:
+            forward_config['start_message_id'] = self.config.getint('FORWARD', 'start_message_id', fallback=0)
+            forward_config['end_message_id'] = self.config.getint('FORWARD', 'end_message_id', fallback=0)
+            forward_config['hide_author'] = self.config.getboolean('FORWARD', 'hide_author', fallback=True)
+            forward_config['delay'] = self.config.getfloat('FORWARD', 'delay', fallback=1.5)
+            forward_config['batch_size'] = self.config.getint('FORWARD', 'batch_size', fallback=30)
+            forward_config['skip_emoji_messages'] = self.config.getboolean('FORWARD', 'skip_emoji_messages', fallback=False)
         
         return forward_config
     
     def get_log_config(self) -> Dict[str, Any]:
-        """获取日志配置"""
-        if 'LOG' not in self.config:
-            return {
-                'level': 'INFO',
-                'file': 'logs/app.log'
+        """
+        获取日志配置
+        
+        Returns:
+            Dict[str, Any]: 日志配置字典
+        """
+        log_config = {}
+        
+        if 'LOG' in self.config:
+            log_config['level'] = self.config.get('LOG', 'level', fallback='INFO').upper()
+            log_config['file'] = self.config.get('LOG', 'file', fallback='logs/app.log')
+        
+        return log_config
+    
+    def get_download_config(self) -> Dict[str, Any]:
+        """
+        获取下载配置
+        
+        Returns:
+            Dict[str, Any]: 下载配置字典
+        """
+        download_config = {}
+        
+        if 'DOWNLOAD' in self.config:
+            download_config['temp_folder'] = self.config.get('DOWNLOAD', 'temp_folder', fallback='temp')
+            download_config['concurrent_downloads'] = self.config.getint('DOWNLOAD', 'concurrent_downloads', fallback=10)
+            download_config['chunk_size'] = self.config.getint('DOWNLOAD', 'chunk_size', fallback=131072)
+            download_config['retry_count'] = self.config.getint('DOWNLOAD', 'retry_count', fallback=3)
+            download_config['retry_delay'] = self.config.getint('DOWNLOAD', 'retry_delay', fallback=5)
+        else:
+            # 默认配置
+            download_config = {
+                'temp_folder': 'temp',
+                'concurrent_downloads': 10,
+                'chunk_size': 131072,
+                'retry_count': 3,
+                'retry_delay': 5
             }
         
-        log_config = {
-            'level': self.config.get('LOG', 'level', fallback='INFO'),
-            'file': self.config.get('LOG', 'file', fallback='logs/app.log'),
-        }
+        return download_config
+    
+    def get_upload_config(self) -> Dict[str, Any]:
+        """
+        获取上传配置
         
-        return log_config 
+        Returns:
+            Dict[str, Any]: 上传配置字典
+        """
+        upload_config = {}
+        
+        if 'UPLOAD' in self.config:
+            upload_config['concurrent_uploads'] = self.config.getint('UPLOAD', 'concurrent_uploads', fallback=3)
+            upload_config['wait_between_messages'] = self.config.getfloat('UPLOAD', 'wait_between_messages', fallback=1.0)
+            upload_config['preserve_formatting'] = self.config.getboolean('UPLOAD', 'preserve_formatting', fallback=True)
+        else:
+            # 默认配置
+            upload_config = {
+                'concurrent_uploads': 3,
+                'wait_between_messages': 1.0,
+                'preserve_formatting': True
+            }
+        
+        return upload_config 

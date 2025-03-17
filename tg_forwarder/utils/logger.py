@@ -80,7 +80,9 @@ class EnhancedLogger:
         if isinstance(level, LogLevel):
             level = level.value
             
-        getattr(self.logger, level.lower())(message)
+        # 使用depth=1确保获取调用者的位置，而不是log函数本身的位置
+        log_func = getattr(self.logger.opt(depth=1), level.lower())
+        log_func(message)
         
         # 如果当前有活跃的进度条，需要重新显示
         if active_progress_bar and active_progress_bar.visible:
@@ -88,31 +90,31 @@ class EnhancedLogger:
     
     def trace(self, message: str) -> None:
         """记录TRACE级别日志"""
-        self.log(LogLevel.TRACE, message)
+        self.logger.opt(depth=1).trace(message)
     
     def debug(self, message: str) -> None:
         """记录DEBUG级别日志"""
-        self.log(LogLevel.DEBUG, message)
+        self.logger.opt(depth=1).debug(message)
     
     def info(self, message: str) -> None:
         """记录INFO级别日志"""
-        self.log(LogLevel.INFO, message)
+        self.logger.opt(depth=1).info(message)
     
     def success(self, message: str) -> None:
         """记录SUCCESS级别日志"""
-        self.log(LogLevel.SUCCESS, message)
+        self.logger.opt(depth=1).success(message)
     
     def warning(self, message: str) -> None:
         """记录WARNING级别日志"""
-        self.log(LogLevel.WARNING, message)
+        self.logger.opt(depth=1).warning(message)
     
     def error(self, message: str) -> None:
         """记录ERROR级别日志"""
-        self.log(LogLevel.ERROR, message)
+        self.logger.opt(depth=1).error(message)
     
     def critical(self, message: str) -> None:
         """记录CRITICAL级别日志"""
-        self.log(LogLevel.CRITICAL, message)
+        self.logger.opt(depth=1).critical(message)
     
     def create_progress_bar(self, id: str, total: int, desc: str = "", **kwargs) -> ProgressBar:
         """
@@ -230,7 +232,7 @@ class LogManager:
             logger.add(
                 sys.stdout,
                 level=cls._global_config.level,
-                format="<green>{time:YYYY-MM-DD HH:mm:ss}</green> | <level>{level: <8}</level> | <cyan>{name}</cyan>:<cyan>{function}</cyan>:<cyan>{line}</cyan> - <level>{message}</level>",
+                format="<green>{time:YYYY-MM-DD HH:mm:ss.SSS}</green> | <level>{level: <8}</level> | <cyan>{extra[name]}</cyan>:<cyan>{function}</cyan>:<cyan>{line}</cyan> - <level>{message}</level>",
                 colorize=cls._global_config.colorize,
                 filter=LogFilter(cls._global_config.filters).filter
             )
@@ -240,7 +242,7 @@ class LogManager:
             logger.add(
                 cls._global_config.file,
                 level=cls._global_config.level,
-                format="{time:YYYY-MM-DD HH:mm:ss} | {level: <8} | {name}:{function}:{line} - {message}",
+                format="{time:YYYY-MM-DD HH:mm:ss.SSS} | {level: <8} | {extra[name]}:{function}:{line} - {message}",
                 rotation=cls._global_config.rotation,
                 retention=cls._global_config.retention,
                 compression=cls._global_config.compression,
