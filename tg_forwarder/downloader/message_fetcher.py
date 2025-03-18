@@ -53,7 +53,7 @@ class MessageFetcher:
         # 如果end_message_id为0，获取最新消息ID
         if end_message_id == 0:
             try:
-                latest_messages = await self.client.get_messages(source_chat_id, 1)
+                latest_messages = await self.client.get_chat_history(source_chat_id, 1)
                 if latest_messages and len(latest_messages) > 0:
                     end_message_id = latest_messages[0].id
                     logger.info(f"获取到最新消息ID: {end_message_id}")
@@ -76,11 +76,10 @@ class MessageFetcher:
         # 批量获取消息
         while current_id <= end_message_id:
             batch_end = min(current_id + self.batch_size - 1, end_message_id)
-            messages_to_fetch = list(range(current_id, batch_end + 1))
             
             try:
                 logger.info(f"获取消息批次: {current_id} 到 {batch_end}")
-                messages = await self.client.get_messages(source_chat_id, messages_to_fetch)
+                messages = await self.client.get_messages_range(source_chat_id, start_message_id, end_message_id, self.batch_size)
                 
                 # 处理获取到的消息
                 grouped_messages = await self._process_messages(messages, source_chat_id)

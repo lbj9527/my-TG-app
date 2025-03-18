@@ -10,13 +10,49 @@ from typing import Dict, Any, List, Union, Optional, Set, Tuple
 from collections import defaultdict
 import json
 
-from pyrogram.types import Message
+from pyrogram.types import Message, MessageEntity
 from pyrogram.errors import FloodWait
 
 from tg_forwarder.utils.logger import get_logger
 
 # 获取日志记录器
 logger = get_logger("media_downloader")
+
+def entity_to_dict(entity: MessageEntity) -> Dict[str, Any]:
+    """
+    将MessageEntity对象转换为字典
+    
+    Args:
+        entity: MessageEntity对象
+        
+    Returns:
+        Dict[str, Any]: 实体字典
+    """
+    result = {
+        "type": str(entity.type) if hasattr(entity.type, "value") else entity.type,
+        "offset": entity.offset,
+        "length": entity.length
+    }
+    
+    # 添加可选属性
+    if hasattr(entity, "url") and entity.url:
+        result["url"] = entity.url
+    
+    if hasattr(entity, "user") and entity.user:
+        result["user"] = {
+            "id": entity.user.id,
+            "is_bot": entity.user.is_bot,
+            "first_name": entity.user.first_name,
+            "username": getattr(entity.user, "username", None)
+        }
+    
+    if hasattr(entity, "language") and entity.language:
+        result["language"] = entity.language
+        
+    if hasattr(entity, "custom_emoji_id") and entity.custom_emoji_id:
+        result["custom_emoji_id"] = entity.custom_emoji_id
+    
+    return result
 
 class MediaDownloader:
     """媒体下载器，负责下载消息中的媒体文件"""
@@ -79,15 +115,39 @@ class MediaDownloader:
     def _save_metadata(self) -> None:
         """保存元数据"""
         try:
+            # 在保存前递归处理所有可能的枚举类型
+            def prepare_for_json(obj):
+                if isinstance(obj, dict):
+                    return {k: prepare_for_json(v) for k, v in obj.items()}
+                elif isinstance(obj, list):
+                    return [prepare_for_json(item) for item in obj]
+                elif hasattr(obj, "value") and not callable(obj.value):  # 处理枚举类型
+                    return str(obj.value)
+                elif hasattr(obj, "__dict__"):  # 处理其他复杂对象
+                    try:
+                        return str(obj)
+                    except:
+                        return f"<Object of type {type(obj).__name__}>"
+                else:
+                    return obj
+            
+            # 处理元数据和下载映射
+            processed_metadata = prepare_for_json(self.message_metadata)
+            processed_mapping = prepare_for_json(self.download_mapping)
+            
+            # 保存处理后的数据
             with open(self.metadata_path, "w", encoding="utf-8") as f:
-                json.dump(self.message_metadata, f, ensure_ascii=False, indent=2)
+                json.dump(processed_metadata, f, ensure_ascii=False, indent=2)
             
             with open(self.download_mapping_path, "w", encoding="utf-8") as f:
-                json.dump(self.download_mapping, f, ensure_ascii=False, indent=2)
+                json.dump(processed_mapping, f, ensure_ascii=False, indent=2)
             
             logger.debug("保存元数据成功")
         except Exception as e:
             logger.error(f"保存元数据时出错: {str(e)}")
+            # 记录更详细的错误信息以帮助调试
+            import traceback
+            logger.debug(f"错误详情: {traceback.format_exc()}")
     
     async def download_media_batch(self, data: Dict[str, Any]) -> Dict[str, Any]:
         """
@@ -349,9 +409,9 @@ class MediaDownloader:
             "media_group_id": group_id or (message.media_group_id if hasattr(message, "media_group_id") else None),
             "message_type": self._get_message_type(message),
             "caption": message.caption if hasattr(message, "caption") else None,
-            "caption_entities": [entity.to_dict() for entity in message.caption_entities] if hasattr(message, "caption_entities") and message.caption_entities else None,
+            "caption_entities": [entity_to_dict(entity) for entity in message.caption_entities] if hasattr(message, "caption_entities") and message.caption_entities else None,
             "text": message.text if hasattr(message, "text") else None,
-            "text_entities": [entity.to_dict() for entity in message.entities] if hasattr(message, "entities") and message.entities else None,
+            "text_entities": [entity_to_dict(entity) for entity in message.entities] if hasattr(message, "entities") and message.entities else None,
         }
         
         # 添加文件特有的元数据
@@ -381,11 +441,10 @@ class MediaDownloader:
             })
         elif hasattr(message, "photo") and message.photo:
             # 对于照片，选择最大尺寸
-            photo = message.photo[-1]
             metadata.update({
-                "width": photo.width,
-                "height": photo.height,
-                "file_size": photo.file_size
+                "width": message.photo.width,
+                "height": message.photo.height,
+                "file_size": message.photo.file_size
             })
         
         # 存储元数据

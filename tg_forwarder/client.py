@@ -11,6 +11,7 @@ from pyrogram.errors import FloodWait, AuthKeyUnregistered, AuthKeyDuplicated, S
 
 from tg_forwarder.utils.logger import get_logger
 
+
 logger = get_logger("client")
 
 class TelegramClient:
@@ -325,3 +326,76 @@ class TelegramClient:
         except Exception as e:
             logger.error(f"获取最新消息ID时出错: {str(e)}")
             return None 
+            
+    async def get_media_group(self, chat_id: Union[str, int], message_id: int) -> List[Message]:
+        """
+        获取媒体组消息
+        
+        Args:
+            chat_id: 聊天ID或用户名
+            message_id: 媒体组中任一消息ID
+        
+        Returns:
+            List[Message]: 媒体组中的所有消息
+            
+        Raises:
+            ValueError: 当消息ID为负数或为0，或目标消息不属于媒体组时
+        """
+        try:
+            media_group = await self.client.get_media_group(chat_id, message_id)
+            logger.info(f"成功获取媒体组 (聊天: {chat_id}, 消息ID: {message_id}): {len(media_group)} 条消息")
+            return media_group
+        except FloodWait as e:
+            logger.warning(f"触发Telegram限流，等待{e.value}秒...")
+            await asyncio.sleep(e.value)
+            # 重试
+            return await self.get_media_group(chat_id, message_id)
+        except ValueError as e:
+            logger.warning(f"获取媒体组失败: {str(e)}")
+            raise
+        except Exception as e:
+            logger.error(f"获取媒体组时出错: {str(e)}")
+            raise 
+
+    async def handle_updates(self):
+        """
+        处理Telegram更新
+        重写此方法以增加错误处理，防止Peer ID无效错误导致程序崩溃
+        """
+        try:
+            # 调用原始方法
+            await super().handle_updates()
+        except ValueError as e:
+            if "Peer id invalid" in str(e):
+                # 记录错误但不中断程序
+                logger.warning(f"处理更新时遇到无效的Peer ID: {str(e)}")
+            else:
+                # 其他ValueError重新抛出
+                raise
+ 
+
+    async def handle_updates(self):
+        """
+        处理Telegram更新
+        重写此方法以增加错误处理，防止Peer ID无效错误导致程序崩溃
+        """
+        try:
+            # 调用原始方法
+            await super().handle_updates()
+        except ValueError as e:
+            if "Peer id invalid" in str(e):
+                # 记录错误但不中断程序
+                logger.warning(f"处理更新时遇到无效的Peer ID: {str(e)}")
+            else:
+                # 其他ValueError重新抛出
+                raise
+        except Exception as e:
+            # 记录其他异常但不终止程序
+            logger.error(f"处理更新时发生错误: {str(e)}")
+            import traceback
+            logger.debug(f"错误详情: {traceback.format_exc()}")
+        except Exception as e:
+            # 记录其他异常但不终止程序
+            logger.error(f"处理更新时发生错误: {str(e)}")
+            import traceback
+            logger.debug(f"错误详情: {traceback.format_exc()}") 
