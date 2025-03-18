@@ -65,7 +65,7 @@ class MediaUploader:
                     "media_uploader_temp",
                     api_id=api_id,
                     api_hash=api_hash,
-                    in_memory=True,
+                    in_memory=False,
                     app_version="TG Forwarder Temp Client v1.0",
                     device_model="PC",
                     system_version="Windows"
@@ -235,7 +235,7 @@ class MediaUploader:
                         # 将消息从第一个频道复制到其他频道
                         if len(self.target_channels) > 1 and result.get("message_ids"):
                             first_message_id = result["message_ids"][0]
-                            await self._forward_to_other_channels(first_channel, first_message_id, group_id)
+                            await self._forward_to_other_channels(first_channel, first_message_id, group_id, True)
                     else:
                         stats["failed_groups"] += 1
                         logger.error(f"上传媒体组 {group_id} 失败: {result.get('error', '未知错误')}")
@@ -274,7 +274,7 @@ class MediaUploader:
                         
                         # 将消息从第一个频道复制到其他频道
                         if len(self.target_channels) > 1 and result.get("message_id"):
-                            await self._forward_to_other_channels(first_channel, result["message_id"], message_id)
+                            await self._forward_to_other_channels(first_channel, result["message_id"], message_id, False)
                     else:
                         stats["failed_singles"] += 1
                         logger.error(f"上传消息 {message_id} 失败: {result.get('error', '未知错误')}")
@@ -661,7 +661,8 @@ class MediaUploader:
     
     async def _forward_to_other_channels(self, source_channel: Union[str, int], 
                                        message_id: int, 
-                                       original_id: Union[str, int]) -> None:
+                                       original_id: Union[str, int],
+                                       is_media_group: bool = False) -> None:
         """
         将消息从第一个频道转发到其他频道
         
@@ -669,6 +670,7 @@ class MediaUploader:
             source_channel: 源频道ID
             message_id: 消息ID
             original_id: 原始消息ID或媒体组ID
+            is_media_group: 是否为媒体组，默认为False
         """
         # 确保临时客户端存在
         if not self.temp_client:
@@ -682,7 +684,10 @@ class MediaUploader:
         if not other_channels:
             return
         
-        logger.info(f"将消息 {message_id} 从频道 {source_channel} 转发到 {len(other_channels)} 个其他频道")
+        if is_media_group:
+            logger.info(f"将媒体组 (消息ID: {message_id}) 从频道 {source_channel} 转发到 {len(other_channels)} 个其他频道")
+        else:
+            logger.info(f"将消息 {message_id} 从频道 {source_channel} 转发到 {len(other_channels)} 个其他频道")
         
         for channel_id in other_channels:
             # 检查是否为链接格式，获取正确的频道ID
@@ -726,17 +731,17 @@ class MediaUploader:
                                                 channel = dialog.chat.id
                                                 logger.info(f"在对话列表中找到匹配的频道: {dialog.chat.title} (ID: {channel})")
                                                 break
-                                    
-                                    if channel == channel_id:  # 如果没有找到匹配的
-                                        # 尝试加入频道
-                                        logger.warning(f"无法找到匹配的频道，尝试从链接加入: {channel_id}")
-                                        try:
-                                            join_result = await self.temp_client.join_chat(channel_id)
-                                            if join_result:
-                                                channel = join_result.id
-                                                logger.info(f"已加入频道: {join_result.title} (ID: {channel})")
-                                        except Exception as join_err:
-                                            logger.error(f"加入频道失败: {str(join_err)}")
+                                
+                                if channel == channel_id:  # 如果没有找到匹配的
+                                    # 尝试加入频道
+                                    logger.warning(f"无法找到匹配的频道，尝试从链接加入: {channel_id}")
+                                    try:
+                                        join_result = await self.temp_client.join_chat(channel_id)
+                                        if join_result:
+                                            channel = join_result.id
+                                            logger.info(f"已加入频道: {join_result.title} (ID: {channel})")
+                                    except Exception as join_err:
+                                        logger.error(f"加入频道失败: {str(join_err)}")
                             except Exception as dialog_err:
                                 logger.error(f"获取对话列表时出错: {str(dialog_err)}")
             except Exception as parse_err:
@@ -749,23 +754,43 @@ class MediaUploader:
             
             for attempt in range(self.retry_count + 1):
                 try:
-                    logger.info(f"转发消息到频道 {channel} (尝试 {attempt+1}/{self.retry_count+1})")
-                    
-                    # 使用临时客户端的copy_message方法转发消息
-                    sent_message = await self.temp_client.copy_message(
-                        chat_id=channel,
-                        from_chat_id=source_channel,
-                        message_id=message_id
-                    )
-                    
-                    if sent_message:
-                        logger.info(f"消息转发成功，目标频道: {channel}, 消息ID: {sent_message.id}")
+                    if is_media_group:
+                        logger.info(f"转发媒体组到频道 {channel} (尝试 {attempt+1}/{self.retry_count+1})")
                         
-                        # 记录转发结果
-                        self._record_upload(original_id, channel, [sent_message.id])
+                        # 使用copy_media_group方法转发媒体组
+                        sent_messages = await self.temp_client.copy_media_group(
+                            chat_id=channel,
+                            from_chat_id=source_channel,
+                            message_id=message_id
+                        )
                         
-                        # 跳出重试循环
-                        break
+                        if sent_messages:
+                            message_ids = [msg.id for msg in sent_messages]
+                            logger.info(f"媒体组转发成功，目标频道: {channel}, 共 {len(message_ids)} 条消息")
+                            
+                            # 记录转发结果
+                            self._record_upload(original_id, channel, message_ids)
+                            
+                            # 跳出重试循环
+                            break
+                    else:
+                        logger.info(f"转发消息到频道 {channel} (尝试 {attempt+1}/{self.retry_count+1})")
+                        
+                        # 使用copy_message方法转发单条消息
+                        sent_message = await self.temp_client.copy_message(
+                            chat_id=channel,
+                            from_chat_id=source_channel,
+                            message_id=message_id
+                        )
+                        
+                        if sent_message:
+                            logger.info(f"消息转发成功，目标频道: {channel}, 消息ID: {sent_message.id}")
+                            
+                            # 记录转发结果
+                            self._record_upload(original_id, channel, [sent_message.id])
+                            
+                            # 跳出重试循环
+                            break
                 
                 except FloodWait as e:
                     wait_time = e.value  # 在新版pyrogram中是e.value
