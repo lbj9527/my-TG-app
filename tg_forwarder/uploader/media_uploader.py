@@ -684,7 +684,64 @@ class MediaUploader:
         
         logger.info(f"将消息 {message_id} 从频道 {source_channel} 转发到 {len(other_channels)} 个其他频道")
         
-        for channel in other_channels:
+        for channel_id in other_channels:
+            # 检查是否为链接格式，获取正确的频道ID
+            channel = channel_id
+            try:
+                # 检查是否是t.me链接格式
+                if isinstance(channel_id, str) and ('t.me/' in channel_id or 'https://' in channel_id):
+                    logger.debug(f"检测到频道链接格式: {channel_id}，正在解析")
+                    
+                    # 尝试先获取频道实体
+                    chat = None
+                    try:
+                        # 使用get_chat方法获取频道信息
+                        chat = await self.temp_client.get_chat(channel_id)
+                        if chat:
+                            channel = chat.id
+                            logger.info(f"已成功解析频道链接，获取到ID: {channel}")
+                    except Exception as e:
+                        logger.warning(f"无法直接获取频道 {channel_id} 的信息: {str(e)}")
+                        
+                        # 如果是私有频道邀请链接，尝试从链接中提取邀请码
+                        if '+' in channel_id:
+                            # 尝试通过对话列表查找匹配的频道
+                            try:
+                                dialogs = await self.temp_client.get_dialogs()
+                                invite_code = None
+                                
+                                # 提取邀请码
+                                if 't.me/+' in channel_id:
+                                    invite_code = channel_id.split('t.me/+')[1].split('/')[0]
+                                elif channel_id.startswith('+'):
+                                    invite_code = channel_id.lstrip('+')
+                                
+                                if invite_code:
+                                    logger.debug(f"提取到邀请码: {invite_code}")
+                                    
+                                    # 在对话列表中查找
+                                    for dialog in dialogs:
+                                        if hasattr(dialog.chat, 'invite_link') and dialog.chat.invite_link:
+                                            if invite_code in dialog.chat.invite_link:
+                                                channel = dialog.chat.id
+                                                logger.info(f"在对话列表中找到匹配的频道: {dialog.chat.title} (ID: {channel})")
+                                                break
+                                    
+                                    if channel == channel_id:  # 如果没有找到匹配的
+                                        # 尝试加入频道
+                                        logger.warning(f"无法找到匹配的频道，尝试从链接加入: {channel_id}")
+                                        try:
+                                            join_result = await self.temp_client.join_chat(channel_id)
+                                            if join_result:
+                                                channel = join_result.id
+                                                logger.info(f"已加入频道: {join_result.title} (ID: {channel})")
+                                        except Exception as join_err:
+                                            logger.error(f"加入频道失败: {str(join_err)}")
+                            except Exception as dialog_err:
+                                logger.error(f"获取对话列表时出错: {str(dialog_err)}")
+            except Exception as parse_err:
+                logger.error(f"解析频道链接时出错: {str(parse_err)}")
+                
             # 检查是否已转发到该频道
             if self._is_message_uploaded(original_id, channel):
                 logger.info(f"消息 {original_id} 已转发到频道 {channel}，跳过")
