@@ -50,88 +50,128 @@ class MediaUploader:
         
         # 临时客户端
         self.temp_client = None
+        
+        # 客户端状态标志
+        self._client_initialized = False
+    
+    async def initialize(self):
+        """
+        初始化上传器，创建临时客户端
+        应在开始使用上传器之前调用此方法
+        
+        Returns:
+            bool: 初始化是否成功
+        """
+        if self._client_initialized:
+            logger.info("临时客户端已经初始化")
+            return True
+            
+        await self._create_temp_client()
+        return self._client_initialized
+    
+    async def shutdown(self):
+        """
+        关闭上传器，释放资源
+        应在完成所有上传任务后调用此方法
+        """
+        if self.temp_client:
+            await self._close_temp_client()
+        
+        # 确保保存上传历史
+        self._save_history()
+        logger.info("媒体上传器已关闭")
     
     async def _create_temp_client(self):
         """创建临时客户端"""
-        if self.temp_client is None:
-            logger.info("创建临时客户端用于媒体上传")
-            # 从原始客户端复制配置信息
-            if hasattr(self.client, 'api_id') and hasattr(self.client, 'api_hash'):
-                api_id = self.client.api_id
-                api_hash = self.client.api_hash
+        if self.temp_client is not None and self._client_initialized:
+            logger.debug("临时客户端已存在，无需重新创建")
+            return
+            
+        logger.info("创建临时客户端用于媒体上传")
+        # 从原始客户端复制配置信息
+        if hasattr(self.client, 'api_id') and hasattr(self.client, 'api_hash'):
+            api_id = self.client.api_id
+            api_hash = self.client.api_hash
+            
+            # 创建临时客户端
+            self.temp_client = Client(
+                "media_uploader_temp",
+                api_id=api_id,
+                api_hash=api_hash,
+                in_memory=False,
+                app_version="TG Forwarder Temp Client v1.0",
+                device_model="PC",
+                system_version="Windows"
+            )
+            
+            # 如果原始客户端有代理设置，也应用到临时客户端
+            if hasattr(self.client, 'proxy_config') and self.client.proxy_config:
+                proxy_type = self.client.proxy_config.get('proxy_type', '').upper()
+                proxy = {
+                    'scheme': proxy_type,
+                    'hostname': self.client.proxy_config.get('addr'),
+                    'port': self.client.proxy_config.get('port')
+                }
                 
-                # 创建临时客户端
-                self.temp_client = Client(
-                    "media_uploader_temp",
-                    api_id=api_id,
-                    api_hash=api_hash,
-                    in_memory=False,
-                    app_version="TG Forwarder Temp Client v1.0",
-                    device_model="PC",
-                    system_version="Windows"
-                )
+                if 'username' in self.client.proxy_config and self.client.proxy_config['username']:
+                    proxy['username'] = self.client.proxy_config['username']
                 
-                # 如果原始客户端有代理设置，也应用到临时客户端
-                if hasattr(self.client, 'proxy_config') and self.client.proxy_config:
-                    proxy_type = self.client.proxy_config.get('proxy_type', '').upper()
-                    proxy = {
-                        'scheme': proxy_type,
-                        'hostname': self.client.proxy_config.get('addr'),
-                        'port': self.client.proxy_config.get('port')
-                    }
+                if 'password' in self.client.proxy_config and self.client.proxy_config['password']:
+                    proxy['password'] = self.client.proxy_config['password']
+                
+                self.temp_client.proxy = proxy
+            
+            # 连接临时客户端
+            await self.temp_client.start()
+            
+            # 验证临时客户端状态
+            try:
+                me = await self.temp_client.get_me()
+                if me:
+                    logger.info(f"临时客户端成功连接到账号: {me.first_name} {me.last_name or ''}")
+                    self._client_initialized = True
+                else:
+                    logger.warning("临时客户端创建成功但无法获取用户信息")
+                    self._client_initialized = False
+            except Exception as e:
+                logger.error(f"验证临时客户端状态出错: {str(e)}")
+                self._client_initialized = False
+        else:
+            # 尝试从已有客户端获取会话字符串
+            try:
+                if hasattr(self.client, 'client'):
+                    # 有些实现中客户端可能是包装在一个属性中的
+                    actual_client = self.client.client
+                    api_id = actual_client.api_id
+                    api_hash = actual_client.api_hash
                     
-                    if 'username' in self.client.proxy_config and self.client.proxy_config['username']:
-                        proxy['username'] = self.client.proxy_config['username']
+                    # 创建临时客户端
+                    self.temp_client = Client(
+                        "media_uploader_temp",
+                        api_id=api_id,
+                        api_hash=api_hash,
+                        in_memory=True
+                    )
                     
-                    if 'password' in self.client.proxy_config and self.client.proxy_config['password']:
-                        proxy['password'] = self.client.proxy_config['password']
+                    # 连接临时客户端
+                    await self.temp_client.start()
                     
-                    self.temp_client.proxy = proxy
-                
-                # 连接临时客户端
-                await self.temp_client.start()
-                
-                # 验证临时客户端状态
-                try:
+                    # 验证临时客户端状态
                     me = await self.temp_client.get_me()
                     if me:
                         logger.info(f"临时客户端成功连接到账号: {me.first_name} {me.last_name or ''}")
+                        self._client_initialized = True
                     else:
                         logger.warning("临时客户端创建成功但无法获取用户信息")
-                except Exception as e:
-                    logger.error(f"验证临时客户端状态出错: {str(e)}")
-            else:
-                # 尝试从已有客户端获取会话字符串
-                try:
-                    if hasattr(self.client, 'client'):
-                        # 有些实现中客户端可能是包装在一个属性中的
-                        actual_client = self.client.client
-                        api_id = actual_client.api_id
-                        api_hash = actual_client.api_hash
-                        
-                        # 创建临时客户端
-                        self.temp_client = Client(
-                            "media_uploader_temp",
-                            api_id=api_id,
-                            api_hash=api_hash,
-                            in_memory=True
-                        )
-                        
-                        # 连接临时客户端
-                        await self.temp_client.start()
-                        
-                        # 验证临时客户端状态
-                        me = await self.temp_client.get_me()
-                        if me:
-                            logger.info(f"临时客户端成功连接到账号: {me.first_name} {me.last_name or ''}")
-                        else:
-                            logger.warning("临时客户端创建成功但无法获取用户信息")
-                    else:
-                        logger.error("无法创建临时客户端：无法获取原始客户端的API信息")
-                except Exception as e:
-                    logger.error(f"创建临时客户端时出错: {str(e)}")
-                    import traceback
-                    logger.debug(f"错误详情: {traceback.format_exc()}")
+                        self._client_initialized = False
+                else:
+                    logger.error("无法创建临时客户端：无法获取原始客户端的API信息")
+                    self._client_initialized = False
+            except Exception as e:
+                logger.error(f"创建临时客户端时出错: {str(e)}")
+                import traceback
+                logger.debug(f"错误详情: {traceback.format_exc()}")
+                self._client_initialized = False
 
     async def _close_temp_client(self):
         """关闭临时客户端"""
@@ -140,6 +180,7 @@ class MediaUploader:
                 await self.temp_client.stop()
                 logger.info("临时客户端已关闭")
                 self.temp_client = None
+                self._client_initialized = False
             except Exception as e:
                 logger.error(f"关闭临时客户端时出错: {str(e)}")
     
@@ -183,7 +224,7 @@ class MediaUploader:
         start_time = time.time()
         
         # 创建临时客户端
-        await self._create_temp_client()
+        await self.initialize()
         
         try:
             # 提取媒体组和单条消息
@@ -312,7 +353,7 @@ class MediaUploader:
             
         finally:
             # 无论结果如何，都关闭临时客户端
-            await self._close_temp_client()
+            await self.shutdown()
     
     async def _upload_media_group(self, messages: List[Dict[str, Any]], channel_id: Union[str, int]) -> Dict[str, Any]:
         """
@@ -330,7 +371,7 @@ class MediaUploader:
         
         # 确保临时客户端存在
         if not self.temp_client:
-            await self._create_temp_client()
+            await self.initialize()
             if not self.temp_client:
                 return {"success": False, "error": "无法创建临时客户端"}
                 
@@ -531,11 +572,11 @@ class MediaUploader:
         Returns:
             Dict[str, Any]: 上传结果
         """
-        # 确保临时客户端存在
-        if not self.temp_client:
-            await self._create_temp_client()
-            if not self.temp_client:
-                return {"success": False, "error": "无法创建临时客户端"}
+        # 确保临时客户端已初始化
+        if not self._client_initialized:
+            await self.initialize()
+            if not self._client_initialized:
+                return {"success": False, "error": "临时客户端初始化失败"}
         
         message_id = message.get("message_id")
         message_type = message.get("message_type")
@@ -688,11 +729,11 @@ class MediaUploader:
             original_id: 原始消息ID或媒体组ID
             is_media_group: 是否为媒体组，默认为False
         """
-        # 确保临时客户端存在
-        if not self.temp_client:
-            await self._create_temp_client()
-            if not self.temp_client:
-                logger.error("无法创建临时客户端，转发失败")
+        # 确保临时客户端已初始化
+        if not self._client_initialized:
+            await self.initialize()
+            if not self._client_initialized:
+                logger.error("临时客户端初始化失败，转发失败")
                 return
         
         other_channels = self.target_channels[1:]

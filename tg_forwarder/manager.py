@@ -341,6 +341,10 @@ class ForwardManager:
                         retry_delay=upload_config["retry_delay"] if "retry_delay" in upload_config else download_config["retry_delay"]
                     )
                     
+                    # 初始化媒体上传器的临时客户端
+                    logger.info("初始化媒体上传器临时客户端...")
+                    await media_uploader.initialize()
+                    
                     # 创建任务队列
                     task_queue = TaskQueue(max_queue_size=upload_config.get("concurrent_uploads", 3))
                     
@@ -429,6 +433,12 @@ class ForwardManager:
                     import traceback
                     logger.error(traceback.format_exc())
                     result["error"] = f"下载上传过程中发生错误: {str(e)}"
+                
+                finally:
+                    # 关闭媒体上传器临时客户端
+                    if 'media_uploader' in locals():
+                        logger.info("关闭媒体上传器临时客户端...")
+                        await media_uploader.shutdown()
             
             # 计算总耗时
             result["end_time"] = time.time()
