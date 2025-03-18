@@ -230,7 +230,7 @@ class MediaUploader:
                         stats["success_groups"] += 1
                         
                         # 记录上传结果
-                        self._record_upload(group_id, first_channel, result.get("message_ids", []))
+                        self._record_upload(group_id, first_channel, result.get("message_ids", []), batch_data.get("source_channel_id"))
                         
                         # 将消息从第一个频道复制到其他频道
                         if len(self.target_channels) > 1 and result.get("message_ids"):
@@ -255,7 +255,7 @@ class MediaUploader:
                     continue
                 
                 # 检查是否已上传
-                if self._is_message_uploaded(message_id, self.target_channels[0]):
+                if self._is_message_uploaded(message_id, self.target_channels[0], batch_data.get("source_channel_id")):
                     logger.info(f"消息 {message_id} 已上传到目标频道，跳过")
                     stats["success_singles"] += 1
                     continue
@@ -270,7 +270,7 @@ class MediaUploader:
                         stats["success_singles"] += 1
                         
                         # 记录上传结果
-                        self._record_upload(message_id, first_channel, [result.get("message_id")])
+                        self._record_upload(message_id, first_channel, [result.get("message_id")], batch_data.get("source_channel_id"))
                         
                         # 将消息从第一个频道复制到其他频道
                         if len(self.target_channels) > 1 and result.get("message_id"):
@@ -594,7 +594,6 @@ class MediaUploader:
         args = {
             "chat_id": channel_id,
             "caption": caption,
-            "caption_entities": caption_entities
         }
         
         if message_type == "photo":
@@ -603,19 +602,36 @@ class MediaUploader:
         elif message_type == "video":
             send_func = self.temp_client.send_video  # 使用临时客户端
             args["video"] = file_path
-            args["width"] = message.get("width")
-            args["height"] = message.get("height")
-            args["duration"] = message.get("duration")
+            
+            # 只添加有效的数值类型参数
+            if isinstance(message.get("width"), (int, float)) and message.get("width") > 0:
+                args["width"] = message.get("width")
+            
+            if isinstance(message.get("height"), (int, float)) and message.get("height") > 0:
+                args["height"] = message.get("height")
+            
+            if isinstance(message.get("duration"), (int, float)) and message.get("duration") > 0:
+                args["duration"] = message.get("duration")
+            
         elif message_type == "document":
             send_func = self.temp_client.send_document  # 使用临时客户端
             args["document"] = file_path
-            args["file_name"] = message.get("file_name")
+            
+            if message.get("file_name"):
+                args["file_name"] = message.get("file_name")
+            
         elif message_type == "audio":
             send_func = self.temp_client.send_audio  # 使用临时客户端
             args["audio"] = file_path
-            args["duration"] = message.get("duration")
-            args["performer"] = message.get("performer")
-            args["title"] = message.get("title")
+            
+            if isinstance(message.get("duration"), (int, float)) and message.get("duration") > 0:
+                args["duration"] = message.get("duration")
+            
+            if message.get("performer"):
+                args["performer"] = message.get("performer")
+            
+            if message.get("title"):
+                args["title"] = message.get("title")
         else:
             return {"success": False, "error": f"不支持的媒体类型: {message_type}"}
         
@@ -769,7 +785,7 @@ class MediaUploader:
                             logger.info(f"媒体组转发成功，目标频道: {channel}, 共 {len(message_ids)} 条消息")
                             
                             # 记录转发结果
-                            self._record_upload(original_id, channel, message_ids)
+                            self._record_upload(original_id, channel, message_ids, source_channel)
                             
                             # 跳出重试循环
                             break
@@ -787,7 +803,7 @@ class MediaUploader:
                             logger.info(f"消息转发成功，目标频道: {channel}, 消息ID: {sent_message.id}")
                             
                             # 记录转发结果
-                            self._record_upload(original_id, channel, [sent_message.id])
+                            self._record_upload(original_id, channel, [sent_message.id], source_channel)
                             
                             # 跳出重试循环
                             break
@@ -819,18 +835,24 @@ class MediaUploader:
             # 转发后等待一小段时间，避免触发限制
             await asyncio.sleep(self.wait_time)
     
-    def _is_message_uploaded(self, message_id: Union[str, int], channel_id: Union[str, int]) -> bool:
+    def _is_message_uploaded(self, message_id: Union[str, int], channel_id: Union[str, int], 
+                           source_channel_id: Union[str, int] = None) -> bool:
         """
         检查消息是否已上传到指定频道
         
         Args:
             message_id: 消息ID
             channel_id: 频道ID
+            source_channel_id: 源频道ID（可选）
             
         Returns:
             bool: 是否已上传
         """
-        message_key = str(message_id)
+        if source_channel_id:
+            message_key = f"{source_channel_id}_{message_id}"
+        else:
+            message_key = str(message_id)
+        
         channel_key = str(channel_id)
         
         if message_key in self.upload_history and channel_key in self.upload_history[message_key]:
@@ -852,16 +874,22 @@ class MediaUploader:
         return self._is_message_uploaded(group_id, channel_id)
     
     def _record_upload(self, original_id: Union[str, int], channel_id: Union[str, int], 
-                     message_ids: List[int]) -> None:
+                     message_ids: List[int], source_channel_id: Union[str, int] = None) -> None:
         """
         记录上传结果
         
         Args:
             original_id: 原始消息ID或媒体组ID
-            channel_id: 频道ID
+            channel_id: 目标频道ID
             message_ids: 上传后的消息ID列表
+            source_channel_id: 源频道ID（可选）
         """
-        original_key = str(original_id)
+        # 如果提供了源频道ID，将其添加到键中
+        if source_channel_id:
+            original_key = f"{source_channel_id}_{original_id}"
+        else:
+            original_key = str(original_id)
+        
         channel_key = str(channel_id)
         
         # 初始化原始ID的记录

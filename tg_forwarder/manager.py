@@ -435,6 +435,9 @@ class ForwardManager:
             result["duration"] = result.get("end_time", 0) - result.get("start_time", 0)
             logger.info(f"总耗时: {result.get('duration', 0):.2f}秒")
             
+            # 添加成功标志
+            result["success_flag"] = True
+            
             return result
         
         except Exception as e:
