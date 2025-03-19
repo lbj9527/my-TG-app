@@ -410,7 +410,8 @@ class ForwardManager:
                                 
                                 # 处理单条消息（每条消息作为一个任务）
                                 for message in single_messages:
-                                    message_id = message.get("message_id", "unknown")
+                                    # 使用直接属性访问而不是get方法
+                                    message_id = message.id if hasattr(message, "id") else "unknown"
                                     logger.info(f"开始下载单条消息 {message_id}")
                                     
                                     # 为单条消息创建一个小批次

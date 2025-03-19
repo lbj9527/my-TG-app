@@ -199,15 +199,38 @@ class MediaDownloader:
         # 准备需要下载的消息列表
         messages_to_download = []
         for message in all_messages:
-            # 检查消息是否已下载过 (通过获取属性而不是get方法)
-            message_id = message.id if hasattr(message, "id") else 0
-            chat_id = message.chat.id if hasattr(message, "chat") else 0
-            
-            if self._is_message_downloaded(chat_id, message_id):
-                logger.debug(f"消息已下载过: {chat_id}_{message_id}")
+            # 检查消息是否为None
+            if message is None:
+                logger.warning("跳过无效消息: 消息对象为None")
                 continue
-            
-            messages_to_download.append(message)
+                
+            # 检查消息是否已下载过 (通过获取属性而不是get方法)
+            try:
+                message_id = message.id if hasattr(message, "id") else 0
+                
+                # 检查chat属性和chat.id属性
+                if not hasattr(message, "chat"):
+                    logger.warning(f"跳过无效消息: 消息 {message_id} 缺少chat属性")
+                    continue
+                    
+                if message.chat is None:
+                    logger.warning(f"跳过无效消息: 消息 {message_id} 的chat属性为None")
+                    continue
+                    
+                chat_id = message.chat.id if hasattr(message.chat, "id") else 0
+                
+                if message_id == 0 or chat_id == 0:
+                    logger.warning(f"跳过无效消息: 消息ID={message_id}, 聊天ID={chat_id}")
+                    continue
+                
+                if self._is_message_downloaded(chat_id, message_id):
+                    logger.debug(f"消息已下载过: {chat_id}_{message_id}")
+                    continue
+                
+                messages_to_download.append(message)
+            except Exception as e:
+                logger.error(f"处理消息对象时出错: {str(e)}")
+                continue
         
         # 串行执行所有下载任务
         results = []
