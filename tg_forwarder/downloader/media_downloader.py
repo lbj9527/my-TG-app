@@ -58,23 +58,35 @@ class MediaDownloader:
     """媒体下载器，负责下载消息中的媒体文件"""
     
     def __init__(self, client, concurrent_downloads: int = 10, temp_folder: str = "temp", 
-                 retry_count: int = 3, retry_delay: int = 5):
+                 retry_count: int = 3, retry_delay: int = 5, serial_mode: bool = True):
         """
         初始化媒体下载器
         
         Args:
             client: Telegram客户端
-            concurrent_downloads: 并发下载数量
+            concurrent_downloads: 并发下载数量 (串行模式下此参数无效)
             temp_folder: 临时文件夹路径
             retry_count: 重试次数
             retry_delay: 重试延迟时间（秒）
+            serial_mode: 是否使用串行下载模式
         """
         self.client = client
         self.concurrent_downloads = concurrent_downloads
         self.temp_folder = temp_folder
         self.retry_count = retry_count
         self.retry_delay = retry_delay
-        self.semaphore = asyncio.Semaphore(concurrent_downloads)
+        self.serial_mode = serial_mode
+        
+        # 即使在串行模式下仍然保留semaphore，以便于未来可能的切换
+        # 串行模式下将concurrent_downloads设为1
+        if self.serial_mode:
+            logger.info("下载器已设置为串行模式")
+            self.effective_concurrent = 1
+        else:
+            logger.info(f"下载器已设置为并发模式，最大并发数: {concurrent_downloads}")
+            self.effective_concurrent = concurrent_downloads
+            
+        self.semaphore = asyncio.Semaphore(self.effective_concurrent)
         self.processed_files: Set[str] = set()  # 已处理文件集合
         
         # 确保临时文件夹存在
@@ -157,7 +169,7 @@ class MediaDownloader:
     
     async def download_media_batch(self, batch: Dict[str, Any]) -> Dict[str, Any]:
         """
-        下载一个批次中的所有媒体文件
+        下载一个批次中的所有媒体文件（串行模式）
 
         Args:
             batch: 包含媒体信息的批次
@@ -182,10 +194,10 @@ class MediaDownloader:
         if not all_messages:
             return {"success": 0, "failed": 0, "files": []}
         
-        logger.info(f"开始并行下载 {len(all_messages)} 个文件...")
+        logger.info(f"开始串行下载 {len(all_messages)} 个文件...")
         
-        # 准备下载任务
-        download_tasks = []
+        # 准备需要下载的消息列表
+        messages_to_download = []
         for message in all_messages:
             # 检查消息是否已下载过 (通过获取属性而不是get方法)
             message_id = message.id if hasattr(message, "id") else 0
@@ -195,31 +207,22 @@ class MediaDownloader:
                 logger.debug(f"消息已下载过: {chat_id}_{message_id}")
                 continue
             
-            # 添加下载任务
-            download_tasks.append(self._process_message_media(message))
+            messages_to_download.append(message)
         
-        # 使用信号量控制并发数量
-        semaphore = asyncio.Semaphore(self.concurrent_downloads)
-        
-        # 定义包装函数，应用信号量控制
-        async def download_with_semaphore(task):
-            async with semaphore:
-                return await task
-        
-        # 并行执行所有下载任务
+        # 串行执行所有下载任务
         results = []
-        if download_tasks:
-            # 将所有任务包装在信号量中
-            bounded_tasks = [download_with_semaphore(task) for task in download_tasks]
-            
-            # 使用as_completed同时获取完成的任务结果
-            for future in asyncio.as_completed(bounded_tasks):
-                try:
-                    result = await future
-                    if result:
-                        results.append(result)
-                except Exception as e:
-                    logger.error(f"下载任务执行异常: {str(e)}")
+        for i, message in enumerate(messages_to_download):
+            try:
+                logger.info(f"开始下载第 {i+1}/{len(messages_to_download)} 个文件...")
+                result = await self._process_message_media(message)
+                if result:
+                    results.append(result)
+                    # 添加一个小的等待，避免过于频繁发送请求
+                    await asyncio.sleep(0.5)
+            except Exception as e:
+                logger.error(f"下载任务执行异常: {str(e)}")
+                import traceback
+                logger.error(f"异常详情: {traceback.format_exc()}")
         
         # 分类统计下载结果
         success_files = [item for item in results if item and "error" not in item]
@@ -248,20 +251,21 @@ class MediaDownloader:
         Returns:
             Dict[str, Any]: 下载结果
         """
-        # 使用信号量限制并发下载数量
-        async with self.semaphore:
-            start_time = time.time()
-            
-            # 消息ID作为索引
-            message_id = message.id
-            chat_id = message.chat.id
-            
-            # 生成唯一文件名
-            file_name = self._generate_file_name(message, chat_id, message_id, group_id)
-            file_path = os.path.join(self.temp_folder, file_name)
-            
-            # 如果文件已存在且已处理，跳过
-            if file_path in self.processed_files:
+        # 串行下载不需要信号量控制
+        start_time = time.time()
+        
+        # 消息ID作为索引
+        message_id = message.id
+        chat_id = message.chat.id
+        
+        # 生成唯一文件名
+        file_name = self._generate_file_name(message, chat_id, message_id, group_id)
+        file_path = os.path.join(self.temp_folder, file_name)
+        
+        # 如果文件已存在且已处理，跳过
+        if file_path in self.processed_files:
+            # 检查已存在文件的大小是否大于0
+            if os.path.exists(file_path) and os.path.getsize(file_path) > 0:
                 logger.debug(f"文件已存在，跳过下载: {file_path}")
                 return {
                     "message_id": message_id,
@@ -271,22 +275,32 @@ class MediaDownloader:
                     "file_name": file_name,
                     "success": True,
                     "duration": 0,
-                    "file_size": os.path.getsize(file_path) if os.path.exists(file_path) else 0,
+                    "file_size": os.path.getsize(file_path),
                     "already_existed": True
                 }
-            
-            # 尝试下载文件
-            for attempt in range(self.retry_count + 1):
-                try:
-                    logger.debug(f"下载文件: {file_name} (尝试 {attempt+1}/{self.retry_count+1})")
-                    
-                    # 下载文件
-                    downloaded_file = await message.download(file_name=file_path)
-                    
-                    if downloaded_file:
-                        # 下载成功
+            else:
+                # 文件存在但大小为0或不存在，重新下载
+                logger.warning(f"文件 {file_path} 已存在但大小为0或不存在，重新下载")
+                if file_path in self.processed_files:
+                    self.processed_files.remove(file_path)
+        
+        # 创建临时文件路径
+        temp_file_path = f"{file_path}.temp"
+        
+        # 尝试下载文件
+        for attempt in range(self.retry_count + 1):
+            try:
+                logger.debug(f"下载文件: {file_name} (尝试 {attempt+1}/{self.retry_count+1})")
+                
+                # 直接下载到最终文件路径，而不是临时文件
+                # 这是为了避免文件重命名操作可能导致的问题
+                downloaded_file = await message.download(file_name=file_path)
+                
+                if downloaded_file:
+                    # 检查文件大小
+                    if os.path.exists(file_path) and os.path.getsize(file_path) > 0:
                         duration = time.time() - start_time
-                        file_size = os.path.getsize(file_path) if os.path.exists(file_path) else 0
+                        file_size = os.path.getsize(file_path)
                         
                         # 确保message_id是字符串
                         str_message_id = str(message_id)
@@ -314,27 +328,71 @@ class MediaDownloader:
                             "file_size": file_size
                         }
                     else:
-                        logger.warning(f"下载失败: {file_name} (无内容)")
-                except FloodWait as e:
-                    wait_time = e.x
-                    logger.warning(f"触发频率限制，等待 {wait_time} 秒")
-                    await asyncio.sleep(wait_time)
-                except Exception as e:
-                    logger.error(f"下载文件出错: {file_name}, 错误: {str(e)}")
-                    if attempt < self.retry_count:
-                        retry_wait = self.retry_delay * (attempt + 1)
-                        logger.info(f"将在 {retry_wait} 秒后重试...")
-                        await asyncio.sleep(retry_wait)
-                    else:
-                        break
-            
-            # 所有重试都失败
-            return {
-                "message_id": message_id,
-                "file_name": file_name,
-                "success": False,
-                "error": "下载失败，达到最大重试次数"
-            }
+                        # 文件大小为0或不存在
+                        logger.warning(f"下载的文件 {file_path} 大小为0或不存在，重试")
+                        if os.path.exists(file_path):
+                            os.remove(file_path)
+                        
+                        # 如果不是最后一次尝试，继续重试
+                        if attempt < self.retry_count:
+                            retry_wait = self.retry_delay * (attempt + 1)
+                            logger.info(f"将在 {retry_wait} 秒后重试...")
+                            await asyncio.sleep(retry_wait)
+                            continue
+                        else:
+                            logger.error(f"下载失败: {file_name} (文件大小为0)")
+                            break
+                else:
+                    logger.warning(f"下载失败: {file_name} (无内容)")
+            except FloodWait as e:
+                # 处理FloodWait错误，等待指定的时间
+                wait_time = e.value if hasattr(e, 'value') else e.x if hasattr(e, 'x') else 60
+                logger.warning(f"触发频率限制，等待 {wait_time} 秒")
+                
+                # 如果等待时间过长，记录错误并放弃此次下载
+                if wait_time > 300:  # 超过5分钟
+                    logger.error(f"等待时间过长 ({wait_time}秒)，中止下载: {file_name}")
+                    return {
+                        "message_id": message_id,
+                        "chat_id": chat_id,
+                        "file_name": file_name,
+                        "success": False,
+                        "error": f"Telegram限制，需要等待{wait_time}秒"
+                    }
+                
+                # 等待指定的时间
+                await asyncio.sleep(wait_time)
+                
+                # 重置重试计数，避免过早放弃
+                if attempt > 0:
+                    attempt -= 1
+            except Exception as e:
+                logger.error(f"下载文件出错: {file_name}, 错误: {str(e)}")
+                import traceback
+                logger.debug(f"错误详情: {traceback.format_exc()}")
+                
+                if attempt < self.retry_count:
+                    retry_wait = self.retry_delay * (attempt + 1)
+                    logger.info(f"将在 {retry_wait} 秒后重试...")
+                    await asyncio.sleep(retry_wait)
+                else:
+                    break
+        
+        # 所有重试都失败，清理临时文件
+        if os.path.exists(file_path) and os.path.getsize(file_path) == 0:
+            try:
+                os.remove(file_path)
+            except:
+                pass
+        
+        # 所有重试都失败
+        return {
+            "message_id": message_id,
+            "chat_id": chat_id,
+            "file_name": file_name,
+            "success": False,
+            "error": "下载失败，达到最大重试次数"
+        }
     
     def _generate_file_name(self, message: Message, chat_id: int, message_id: int, group_id: str = None) -> str:
         """
