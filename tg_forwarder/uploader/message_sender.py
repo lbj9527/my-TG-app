@@ -11,6 +11,7 @@ from pyrogram.errors import FloodWait, SlowmodeWait, ChannelPrivate, ChatForward
 
 from tg_forwarder.utils.logger import get_logger
 from tg_forwarder.uploader.utils import TelegramClientManager, MediaUtils
+from tg_forwarder.channel_parser import ChannelValidator
 
 # 获取日志记录器
 logger = get_logger("message_sender")
@@ -34,6 +35,7 @@ class MessageSender:
         self.wait_time = wait_time
         self.retry_count = retry_count
         self.retry_delay = retry_delay
+        self.validator = ChannelValidator(client_manager.client)
     
     @property
     def client(self):
@@ -60,6 +62,27 @@ class MessageSender:
         if not self.client:
             return {"success": False, "error": "客户端未初始化"}
         
+        # 处理私密频道链接
+        target_chat_id = channel_id
+        if isinstance(channel_id, str) and (channel_id.startswith('+') or 't.me/+' in channel_id):
+            # 如果是纯邀请码格式，转换为完整链接
+            if channel_id.startswith('+') and '/' not in channel_id:
+                channel_id = f"https://t.me/{channel_id}"
+            
+            logger.info(f"处理媒体组发送的私密频道链接: {channel_id}")
+            
+            # 尝试获取实际chat实体和ID
+            try:
+                chat_entity = await self.client_manager.client.get_chat(channel_id)
+                if chat_entity:
+                    target_chat_id = chat_entity.id
+                    logger.info(f"成功获取私密频道ID: {target_chat_id}")
+                else:
+                    return {"success": False, "error": f"无法获取私密频道实体: {channel_id}"}
+            except Exception as e:
+                logger.error(f"获取私密频道实体时出错: {str(e)}")
+                return {"success": False, "error": f"无法处理私密频道链接: {str(e)}"}
+        
         # 创建媒体组
         media_group = MediaUtils.create_media_group(messages)
         
@@ -69,13 +92,13 @@ class MessageSender:
         # 尝试发送媒体组
         for attempt in range(self.retry_count + 1):
             try:
-                logger.info(f"正在发送媒体组 (尝试 {attempt+1}/{self.retry_count+1})...")
+                logger.info(f"正在发送媒体组到 {target_chat_id} (尝试 {attempt+1}/{self.retry_count+1})...")
                 start_time = time.time()
                 
                 # 使用客户端管理器的错误处理包装器
                 result = await self.client_manager.with_error_handling(
                     self.client.send_media_group,
-                    chat_id=channel_id,
+                    chat_id=target_chat_id,
                     media=media_group
                 )
                 
@@ -141,20 +164,41 @@ class MessageSender:
         if not self.client:
             return {"success": False, "error": "客户端未初始化"}
         
+        # 处理私密频道链接
+        target_chat_id = channel_id
+        if isinstance(channel_id, str) and (channel_id.startswith('+') or 't.me/+' in channel_id):
+            # 如果是纯邀请码格式，转换为完整链接
+            if channel_id.startswith('+') and '/' not in channel_id:
+                channel_id = f"https://t.me/{channel_id}"
+            
+            logger.info(f"处理单条消息发送的私密频道链接: {channel_id}")
+            
+            # 尝试获取实际chat实体和ID
+            try:
+                chat_entity = await self.client_manager.client.get_chat(channel_id)
+                if chat_entity:
+                    target_chat_id = chat_entity.id
+                    logger.info(f"成功获取私密频道ID: {target_chat_id}")
+                else:
+                    return {"success": False, "error": f"无法获取私密频道实体: {channel_id}"}
+            except Exception as e:
+                logger.error(f"获取私密频道实体时出错: {str(e)}")
+                return {"success": False, "error": f"无法处理私密频道链接: {str(e)}"}
+        
         message_id = message.get("message_id")
         message_type = message.get("message_type")
         file_path = message.get("file_path")
         
         # 处理纯文本消息
         if message_type == "text":
-            return await self._send_text_message(message, channel_id)
+            return await self._send_text_message(message, target_chat_id)
         
         # 处理媒体消息
         if not file_path or not os.path.exists(file_path):
             return {"success": False, "error": f"文件 {file_path} 不存在"}
         
         # 准备发送参数
-        args = MediaUtils.prepare_single_message_args(message, channel_id)
+        args = MediaUtils.prepare_single_message_args(message, target_chat_id)
         
         # 根据消息类型选择发送方法
         if message_type == "photo":
@@ -171,7 +215,7 @@ class MessageSender:
         # 尝试发送媒体
         for attempt in range(self.retry_count + 1):
             try:
-                logger.info(f"发送 {message_type} 到频道 {channel_id} (尝试 {attempt+1}/{self.retry_count+1})")
+                logger.info(f"发送 {message_type} 到频道 {target_chat_id} (尝试 {attempt+1}/{self.retry_count+1})")
                 
                 # 使用客户端管理器的错误处理包装器
                 sent_message = await self.client_manager.with_error_handling(
@@ -281,15 +325,52 @@ class MessageSender:
         if not self.client:
             return {"success": False, "error": "客户端未初始化"}
         
+        # 处理私密频道链接 - 直接使用ChannelValidator的方法获取实际聊天ID
+        target_chat_id = target_channel
+        if isinstance(target_channel, str) and (target_channel.startswith('+') or 't.me/+' in target_channel):
+            # 如果是纯邀请码格式，转换为完整链接
+            if target_channel.startswith('+') and '/' not in target_channel:
+                target_channel = f"https://t.me/{target_channel}"
+            
+            logger.info(f"处理私密频道链接: {target_channel}")
+            
+            # 尝试获取实际chat实体和ID
+            try:
+                chat_entity = await self.client_manager.client.get_chat(target_channel)
+                if chat_entity:
+                    target_chat_id = chat_entity.id
+                    logger.info(f"成功获取私密频道ID: {target_chat_id}")
+                else:
+                    return {"success": False, "error": f"无法获取私密频道实体: {target_channel}"}
+            except Exception as e:
+                logger.error(f"获取私密频道实体时出错: {str(e)}")
+                return {"success": False, "error": f"无法处理私密频道链接: {str(e)}"}
+        
+        # 同样处理源频道
+        source_chat_id = source_channel
+        if isinstance(source_channel, str) and (source_channel.startswith('+') or 't.me/+' in source_channel):
+            if source_channel.startswith('+') and '/' not in source_channel:
+                source_channel = f"https://t.me/{source_channel}"
+            
+            try:
+                chat_entity = await self.client_manager.client.get_chat(source_channel)
+                if chat_entity:
+                    source_chat_id = chat_entity.id
+                    logger.info(f"成功获取源私密频道ID: {source_chat_id}")
+                else:
+                    return {"success": False, "error": f"无法获取源私密频道实体: {source_channel}"}
+            except Exception as e:
+                return {"success": False, "error": f"无法处理源私密频道链接: {str(e)}"}
+        
         for attempt in range(self.retry_count + 1):
             try:
-                logger.info(f"复制消息从频道 {source_channel} 到 {target_channel} (尝试 {attempt+1}/{self.retry_count+1})")
+                logger.info(f"复制消息从频道 {source_chat_id} 到 {target_chat_id} (尝试 {attempt+1}/{self.retry_count+1})")
                 
                 # 使用客户端管理器的错误处理包装器
                 copied_message = await self.client_manager.with_error_handling(
                     self.client.copy_message,
-                    chat_id=target_channel,
-                    from_chat_id=source_channel,
+                    chat_id=target_chat_id,
+                    from_chat_id=source_chat_id,
                     message_id=message_id
                 )
                 
@@ -337,15 +418,52 @@ class MessageSender:
         if not self.client:
             return {"success": False, "error": "客户端未初始化"}
         
+        # 处理私密频道链接 - 直接使用ChannelValidator的方法获取实际聊天ID
+        target_chat_id = target_channel
+        if isinstance(target_channel, str) and (target_channel.startswith('+') or 't.me/+' in target_channel):
+            # 如果是纯邀请码格式，转换为完整链接
+            if target_channel.startswith('+') and '/' not in target_channel:
+                target_channel = f"https://t.me/{target_channel}"
+            
+            logger.info(f"处理私密频道链接: {target_channel}")
+            
+            # 尝试获取实际chat实体和ID
+            try:
+                chat_entity = await self.client_manager.client.get_chat(target_channel)
+                if chat_entity:
+                    target_chat_id = chat_entity.id
+                    logger.info(f"成功获取私密频道ID: {target_chat_id}")
+                else:
+                    return {"success": False, "error": f"无法获取私密频道实体: {target_channel}"}
+            except Exception as e:
+                logger.error(f"获取私密频道实体时出错: {str(e)}")
+                return {"success": False, "error": f"无法处理私密频道链接: {str(e)}"}
+        
+        # 同样处理源频道
+        source_chat_id = source_channel
+        if isinstance(source_channel, str) and (source_channel.startswith('+') or 't.me/+' in source_channel):
+            if source_channel.startswith('+') and '/' not in source_channel:
+                source_channel = f"https://t.me/{source_channel}"
+            
+            try:
+                chat_entity = await self.client_manager.client.get_chat(source_channel)
+                if chat_entity:
+                    source_chat_id = chat_entity.id
+                    logger.info(f"成功获取源私密频道ID: {source_chat_id}")
+                else:
+                    return {"success": False, "error": f"无法获取源私密频道实体: {source_channel}"}
+            except Exception as e:
+                return {"success": False, "error": f"无法处理源私密频道链接: {str(e)}"}
+        
         for attempt in range(self.retry_count + 1):
             try:
-                logger.info(f"复制媒体组从频道 {source_channel} 到 {target_channel} (尝试 {attempt+1}/{self.retry_count+1})")
+                logger.info(f"复制媒体组从频道 {source_chat_id} 到 {target_chat_id} (尝试 {attempt+1}/{self.retry_count+1})")
                 
                 # 使用客户端管理器的错误处理包装器
                 copied_messages = await self.client_manager.with_error_handling(
                     self.client.copy_media_group,
-                    chat_id=target_channel,
-                    from_chat_id=source_channel,
+                    chat_id=target_chat_id,
+                    from_chat_id=source_chat_id,
                     message_id=message_id
                 )
                 
