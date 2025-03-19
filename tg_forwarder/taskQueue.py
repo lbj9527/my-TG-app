@@ -4,11 +4,10 @@
 
 import asyncio
 from typing import Dict, Any, List, Callable, Awaitable, Optional, Union
-import logging
 import time
 from concurrent.futures import ThreadPoolExecutor
 
-from tg_forwarder.utils.logger import get_logger
+from tg_forwarder.logModule.logger import get_logger
 
 # 获取日志记录器
 logger = get_logger("task_queue")
@@ -89,8 +88,7 @@ class TaskQueue:
             
         except Exception as e:
             logger.error(f"任务队列执行错误: {str(e)}")
-            import traceback
-            logger.error(f"错误详情: {traceback.format_exc()}")
+            logger.exception("错误详情:")
             
             # 取消所有未完成的任务
             if not self.producer_task.done():
@@ -126,6 +124,7 @@ class TaskQueue:
             logger.warning("生产者任务被取消")
         except Exception as e:
             logger.error(f"生产者任务出错: {str(e)}")
+            logger.exception("错误详情:")
         finally:
             logger.info(f"生产者完成任务，已入队 {self.stats['enqueued']} 项")
     
@@ -166,6 +165,7 @@ class TaskQueue:
                 break
             except Exception as e:
                 logger.error(f"消费者 #{consumer_id} 处理任务时出错: {str(e)}")
+                logger.exception("错误详情:")
                 self.stats["failed"] += 1
                 # 确保队列任务被标记为完成，避免阻塞
                 try:
@@ -198,6 +198,7 @@ class TaskQueue:
             logger.warning("等待队列任务完成超时")
         except Exception as e:
             logger.error(f"关闭队列时出错: {str(e)}")
+            logger.exception("错误详情:")
     
     async def start(self, producer_func: Callable[[], Awaitable[None]], 
                    consumer_func: Callable[[Any], Awaitable[Any]], 

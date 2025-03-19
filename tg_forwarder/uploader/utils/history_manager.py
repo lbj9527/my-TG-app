@@ -8,7 +8,7 @@ import time
 import asyncio
 from typing import Dict, Any, List, Union, Optional
 
-from tg_forwarder.utils.logger import get_logger
+from tg_forwarder.logModule.logger import get_logger
 
 # 获取日志记录器
 logger = get_logger("history_manager")

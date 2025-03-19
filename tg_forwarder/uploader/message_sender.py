@@ -9,7 +9,7 @@ from typing import Dict, Any, List, Union, Optional, Tuple
 
 from pyrogram.errors import FloodWait, SlowmodeWait, ChannelPrivate, ChatForwardsRestricted
 
-from tg_forwarder.utils.logger import get_logger
+from tg_forwarder.logModule.logger import get_logger
 from tg_forwarder.uploader.utils import TelegramClientManager, MediaUtils
 from tg_forwarder.channel_parser import ChannelValidator
 

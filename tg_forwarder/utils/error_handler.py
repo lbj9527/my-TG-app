@@ -2,12 +2,11 @@
 错误处理模块，负责处理各类错误情况
 """
 
-import logging
 import asyncio
 import re
 from typing import Dict, Any, Callable, Optional, Union, List
 
-from tg_forwarder.utils.logger import get_logger
+from tg_forwarder.logModule.logger import get_logger
 
 # 获取日志记录器
 logger = get_logger("error_handler")

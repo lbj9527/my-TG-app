@@ -10,7 +10,7 @@ from typing import Dict, Any, Optional, Callable
 from pyrogram import Client
 from pyrogram.errors import FloodWait, InternalServerError, Unauthorized
 
-from tg_forwarder.utils.logger import get_logger
+from tg_forwarder.logModule.logger import get_logger
 
 # 获取日志记录器
 logger = get_logger("client_manager")

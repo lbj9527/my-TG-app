@@ -9,10 +9,12 @@ import os
 import sys
 import asyncio
 import argparse
-from loguru import logger
 
+from tg_forwarder.logModule.logger import setup_logger, get_logger
 from tg_forwarder.manager import ForwardManager
-from tg_forwarder.utils.logger import setup_logger
+
+# 获取日志记录器
+logger = get_logger("main")
 
 def parse_arguments():
     """解析命令行参数"""
@@ -57,13 +59,21 @@ async def main():
     """主程序"""
     args = parse_arguments()
     
+    # 设置日志系统
+    setup_logger({
+        'level': 'INFO',
+        'file': 'logs/app.log',
+        'rotation': '10 MB',
+        'retention': '7 days'
+    })
+    
     try:
         # 检查配置文件是否存在
         if not os.path.exists(args.config_path):
             if os.path.exists("config_example.ini"):
-                print(f"错误: 配置文件 '{args.config_path}' 不存在。请复制并修改 config_example.ini")
+                logger.error(f"配置文件 '{args.config_path}' 不存在。请复制并修改 config_example.ini")
             else:
-                print(f"错误: 配置文件 '{args.config_path}' 不存在。")
+                logger.error(f"配置文件 '{args.config_path}' 不存在。")
             return 1
         
         # 创建转发管理器
@@ -92,13 +102,11 @@ async def main():
             await manager.shutdown()
     
     except KeyboardInterrupt:
-        print("\n程序被用户中断")
+        logger.warning("程序被用户中断")
         return 130
     
     except Exception as e:
-        print(f"发生错误: {str(e)}")
-        import traceback
-        traceback.print_exc()
+        logger.exception(f"发生错误: {str(e)}")
         return 1
 
 if __name__ == "__main__":

@@ -9,7 +9,7 @@ from pyrogram import Client, filters
 from pyrogram.types import Message
 from pyrogram.errors import FloodWait, AuthKeyUnregistered, AuthKeyDuplicated, SessionPasswordNeeded
 
-from tg_forwarder.utils.logger import get_logger
+from tg_forwarder.logModule.logger import get_logger
 
 
 logger = get_logger("client")

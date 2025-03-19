@@ -466,3 +466,69 @@ tg_forwarder/
 3. 应用结束时调用`media_uploader.shutdown()`释放资源
 
 这些优化显著提高了程序在处理大批量媒体时的稳定性和效率，特别是对于需要长时间运行的任务。
+
+### v1.4.0 (2023-03-22)
+
+#### 新日志系统
+
+我们完全重构了日志系统，使用loguru库实现，提供了更简洁、高效的日志记录功能。
+
+##### 特点
+
+1. **简洁易用**：使用简单的API接口记录日志
+2. **分级管理**：支持TRACE、DEBUG、INFO、SUCCESS、WARNING、ERROR、CRITICAL多个日志级别
+3. **日志轮转**：自动根据配置进行日志轮转，避免日志文件过大
+4. **错误跟踪**：提供异常堆栈跟踪，方便Debug
+5. **独立错误日志**：单独记录错误日志，方便问题排查
+
+##### 使用方法
+
+1. 初始化日志系统：
+
+```python
+from tg_forwarder.logs.logger import setup_logger
+
+# 设置日志系统
+setup_logger({
+    'level': 'INFO',  # 日志级别
+    'file': 'logs/app.log',  # 日志文件路径
+    'rotation': '10 MB',  # 日志轮转大小
+    'retention': '7 days'  # 日志保留时间
+})
+```
+
+2. 在代码中使用：
+
+```python
+from tg_forwarder.logs.logger import get_logger
+
+# 获取日志记录器
+logger = get_logger("module_name")  # 推荐使用模块名作为记录器名称
+
+# 记录不同级别的日志
+logger.debug("调试信息")
+logger.info("普通信息")
+logger.success("成功信息")
+logger.warning("警告信息")
+logger.error("错误信息")
+logger.critical("严重错误信息")
+
+# 记录异常
+try:
+    # 可能抛出异常的代码
+    result = some_function()
+except Exception as e:
+    logger.exception(f"发生错误: {str(e)}")  # 自动记录异常堆栈
+```
+
+##### 配置选项
+
+日志系统支持以下配置选项：
+
+- `level`: 日志级别，可选值包括TRACE、DEBUG、INFO、SUCCESS、WARNING、ERROR、CRITICAL
+- `file`: 日志文件路径
+- `rotation`: 日志轮转策略，如"10 MB"、"1 day"等
+- `retention`: 日志保留策略，如"7 days"
+- `compression`: 日志压缩格式，如"zip"
+- `format`: 日志格式模板
+- `use_console`: 是否输出到控制台，默认为True

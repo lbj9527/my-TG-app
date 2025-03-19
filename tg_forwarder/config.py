@@ -5,7 +5,7 @@
 import os
 import configparser
 from typing import List, Optional, Dict, Any, Union
-import logging
+from pathlib import Path
 
 class ConfigError(Exception):
     """配置错误异常"""
@@ -127,6 +127,27 @@ class Config:
         if 'LOG' in self.config:
             log_config['level'] = self.config.get('LOG', 'level', fallback='INFO').upper()
             log_config['file'] = self.config.get('LOG', 'file', fallback='logs/app.log')
+            # 新增的日志配置选项
+            log_config['rotation'] = self.config.get('LOG', 'rotation', fallback='10 MB')
+            log_config['retention'] = self.config.get('LOG', 'retention', fallback='30 days')
+            log_config['compression'] = self.config.get('LOG', 'compression', fallback='zip')
+            log_config['use_console'] = self.config.getboolean('LOG', 'use_console', fallback=True)
+            log_config['errors_file'] = self.config.get('LOG', 'errors_file', fallback='logs/error.log')
+        else:
+            # 默认配置
+            log_config = {
+                'level': 'INFO',
+                'file': 'logs/app.log',
+                'rotation': '10 MB',
+                'retention': '30 days',
+                'compression': 'zip',
+                'use_console': True,
+                'errors_file': 'logs/error.log'
+            }
+        
+        # 确保日志目录存在
+        log_dir = Path(log_config['file']).parent
+        log_dir.mkdir(parents=True, exist_ok=True)
         
         return log_config
     

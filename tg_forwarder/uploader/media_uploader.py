@@ -7,7 +7,7 @@ import asyncio
 import time
 from typing import Dict, Any, List, Union, Optional
 
-from tg_forwarder.utils.logger import get_logger
+from tg_forwarder.logModule.logger import get_logger
 from tg_forwarder.uploader.utils import (
     UploaderConfigValidator,
     UploadHistoryManager,

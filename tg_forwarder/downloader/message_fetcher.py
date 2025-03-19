@@ -4,14 +4,13 @@
 
 import asyncio
 from typing import Dict, Any, List, Optional, Union, AsyncGenerator, Tuple, Set
-import logging
 import time
 from collections import defaultdict
 
 from pyrogram.types import Message
 from pyrogram.errors import FloodWait
 
-from tg_forwarder.utils.logger import get_logger
+from tg_forwarder.logModule.logger import get_logger
 
 # 获取日志记录器
 logger = get_logger("message_fetcher")
@@ -62,6 +61,7 @@ class MessageFetcher:
                     end_message_id = start_message_id
             except Exception as e:
                 logger.error(f"获取最新消息ID时出错: {str(e)}")
+                logger.exception("错误详情:")
                 end_message_id = start_message_id
         
         # 确保end_message_id大于start_message_id
@@ -78,7 +78,7 @@ class MessageFetcher:
             batch_end = min(current_id + self.batch_size - 1, end_message_id)
             
             try:
-                logger.info(f"获取消息批次: {current_id} 到 {batch_end}")
+                logger.debug(f"获取消息批次: {current_id} 到 {batch_end}")
                 messages = await self.client.get_messages_range(source_chat_id, start_message_id, end_message_id, self.batch_size)
                 
                 # 处理获取到的消息
@@ -110,6 +110,7 @@ class MessageFetcher:
                 await asyncio.sleep(wait_time)
             except Exception as e:
                 logger.error(f"获取消息 {current_id} 到 {batch_end} 时出错: {str(e)}")
+                logger.exception("错误详情:")
                 current_id = batch_end + 1  # 跳过错误的批次
     
     async def _process_messages(self, messages: List[Message], chat_id: Union[str, int]) -> Dict[str, List]:
@@ -191,6 +192,7 @@ class MessageFetcher:
                     logger.warning(f"无法获取完整媒体组 {group_key}，将 {len(messages)} 条消息作为单独消息处理")
             except Exception as e:
                 logger.error(f"获取媒体组 {group_key} 时出错: {str(e)}")
+                logger.exception("错误详情:")
                 
                 # 如果出错，将各消息添加为单条消息
                 for msg in messages:

@@ -13,7 +13,7 @@ import json
 from pyrogram.types import Message, MessageEntity
 from pyrogram.errors import FloodWait
 
-from tg_forwarder.utils.logger import get_logger
+from tg_forwarder.logModule.logger import get_logger
 
 # 获取日志记录器
 logger = get_logger("media_downloader")

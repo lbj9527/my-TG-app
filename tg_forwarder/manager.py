@@ -14,7 +14,7 @@ from tg_forwarder.config import Config
 from tg_forwarder.client import TelegramClient
 from tg_forwarder.channel_parser import ChannelParser, ChannelValidator
 from tg_forwarder.forwarder import MessageForwarder
-from tg_forwarder.utils.logger import setup_logger, get_logger
+from tg_forwarder.logModule.logger import setup_logger, get_logger
 from tg_forwarder.client import Client
 from tg_forwarder.channel_state import ChannelStateManager
 

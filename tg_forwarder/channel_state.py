@@ -2,11 +2,10 @@
 频道状态管理模块，负责集中管理频道状态信息
 """
 
-import logging
 from typing import Dict, Union, Optional, List
 import time
 
-from tg_forwarder.utils.logger import get_logger
+from tg_forwarder.logModule.logger import get_logger
 
 logger = get_logger("channel_state")
 
