@@ -202,83 +202,153 @@ class MessageAssembler:
         # 如果是字符串，尝试转换为整数
         if isinstance(group_id, str) and group_id.isdigit():
             group_id_variants.append(int(group_id))
+        # 如果是负数，还要尝试不同的字符串表示
+        if isinstance(group_id, int) and group_id < 0:
+            group_id_variants.append(f"{group_id}")  # 例如："-1234567890"
+        if isinstance(group_id, str) and group_id.startswith("-") and group_id[1:].isdigit():
+            group_id_variants.append(int(group_id))  # 例如：int("-1234567890")
+            
         logger.debug(f"将尝试以下变体的媒体组ID: {group_id_variants}")
         
-        # 检查元数据键和值的类型
+        # 确定键的类型，用于调试
         if self.message_metadata:
             sample_key = next(iter(self.message_metadata.keys()))
-            sample_value = self.message_metadata[sample_key]
-            logger.debug(f"元数据键类型: {type(sample_key).__name__}, 示例键: {sample_key}")
-            if "media_group_id" in sample_value and sample_value["media_group_id"]:
-                logger.debug(f"元数据中媒体组ID类型: {type(sample_value['media_group_id']).__name__}, 示例值: {sample_value['media_group_id']}")
+            key_type = f"{type(sample_key).__name__} (样例: {sample_key})"
         else:
-            logger.debug(f"元数据键类型: 未知")
+            key_type = "未知"
+        logger.debug(f"元数据键类型: {key_type}")
         
-        # 查找所有属于该媒体组的消息
-        for msg_id, metadata in self.message_metadata.items():
-            msg_group_id = metadata.get("media_group_id")
-            
-            # 检查媒体组ID是否匹配（考虑不同类型）
-            if msg_group_id is not None and any(variant == msg_group_id for variant in group_id_variants):
-                # 检查是否有对应的下载映射
-                if msg_id in self.download_mapping:
-                    file_path = self.download_mapping[msg_id]
-                    
-                    # 检查文件是否存在
-                    if os.path.exists(file_path):
-                        group_messages.append({
-                            "message_id": msg_id,
-                            "metadata": metadata,
-                            "file_path": file_path
-                        })
-                        logger.debug(f"找到媒体组消息: 消息ID={msg_id}, 文件路径={file_path}")
+        # 扫描所有下载记录，直接从文件列表中构建媒体组
+        if not os.path.exists(self.metadata_path) or not self.message_metadata:
+            logger.warning(f"元数据文件不存在或为空，尝试从下载的文件路径中提取媒体组信息")
+            # 从下载文件路径中寻找该媒体组的文件
+            temp_dir = os.path.dirname(self.metadata_path)
+            if os.path.exists(temp_dir):
+                files = os.listdir(temp_dir)
+                matched_files = []
+                
+                # 查找包含媒体组ID的文件
+                for filename in files:
+                    for variant in group_id_variants:
+                        # 检查文件名是否包含媒体组ID (格式通常为: chat_id_message_id_group_GROUP_ID.ext)
+                        if f"_group_{variant}" in filename and not filename.endswith(".temp"):
+                            full_path = os.path.join(temp_dir, filename)
+                            # 尝试从文件名提取消息ID
+                            parts = filename.split("_")
+                            if len(parts) >= 3:
+                                try:
+                                    message_id = parts[1]  # 通常是第二部分: chat_id_message_id_...
+                                    matched_files.append({
+                                        "message_id": message_id,
+                                        "file_path": full_path,
+                                        "media_group_id": variant,
+                                        "message_type": self._get_file_type(filename),
+                                        "file_name": filename
+                                    })
+                                    logger.debug(f"从文件路径中找到媒体组文件: {filename}")
+                                except Exception as e:
+                                    logger.error(f"处理文件名 {filename} 时出错: {str(e)}")
+                
+                if matched_files:
+                    logger.info(f"从文件路径中找到 {len(matched_files)} 个属于媒体组 {group_id} 的文件")
+                    return matched_files
+        
+        # 尝试寻找属于该媒体组的消息，使用不同的ID变体
+        for variant in group_id_variants:
+            for msg_id, metadata in self.message_metadata.items():
+                if metadata.get("media_group_id") == variant:
+                    # 检查是否有对应的下载文件
+                    if msg_id in self.download_mapping:
+                        file_path = self.download_mapping[msg_id]
+                        if os.path.exists(file_path):
+                            # 复制元数据并添加文件路径
+                            message_data = metadata.copy()
+                            message_data["file_path"] = file_path
+                            message_data["message_id"] = msg_id
+                            group_messages.append(message_data)
+                            logger.debug(f"找到属于媒体组 {variant} 的消息: ID={msg_id}, 文件={file_path}")
+                        else:
+                            logger.warning(f"消息 {msg_id} 的下载文件不存在: {file_path}")
                     else:
-                        logger.warning(f"消息 {msg_id} 的文件不存在: {file_path}")
-                else:
-                    logger.warning(f"消息 {msg_id} 没有对应的下载映射")
+                        logger.warning(f"消息 {msg_id} 没有对应的下载记录")
+            
+            if group_messages:
+                logger.info(f"成功匹配到媒体组 {variant} 的 {len(group_messages)} 条消息")
+                break
         
-        # 如果没有找到媒体组消息，记录日志并返回空列表
         if not group_messages:
             logger.warning(f"没有找到媒体组 {group_id} 的消息，已尝试以下变体: {group_id_variants}")
-            # 输出一些额外的调试信息
-            if all_group_ids:
-                logger.debug(f"元数据中存在的媒体组ID: {list(all_group_ids)[:5]}...")
+            
+            # 在没有元数据的情况下，尝试从下载的文件名直接获取信息
+            temp_dir = os.path.dirname(self.metadata_path)
+            if os.path.exists(temp_dir):
+                # 直接从文件名匹配媒体组
+                logger.info(f"尝试从文件名中匹配媒体组 {group_id}")
+                matched_files = []
+                
+                for filename in os.listdir(temp_dir):
+                    if not filename.endswith(".temp") and not filename.endswith(".json"):
+                        for variant in group_id_variants:
+                            if f"_group_{variant}" in filename:
+                                full_path = os.path.join(temp_dir, filename)
+                                # 尝试解析文件名获取消息ID
+                                try:
+                                    parts = filename.split("_")
+                                    if len(parts) >= 3:
+                                        chat_id = parts[0]
+                                        message_id = parts[1]
+                                        matched_files.append({
+                                            "message_id": message_id,
+                                            "chat_id": chat_id,
+                                            "file_path": full_path,
+                                            "media_group_id": variant,
+                                            "message_type": self._get_file_type(filename),
+                                            "file_name": filename
+                                        })
+                                        logger.debug(f"从文件名中匹配到媒体组文件: {filename}")
+                                except Exception as e:
+                                    logger.error(f"解析文件名 {filename} 时出错: {str(e)}")
+                
+                if matched_files:
+                    logger.info(f"通过文件名匹配找到 {len(matched_files)} 个媒体组文件")
+                    return matched_files
+            
             return []
         
-        # 按消息ID排序
-        try:
-            # 尝试转换为数字排序
-            group_messages.sort(key=lambda x: int(x["message_id"]))
-            logger.debug(f"使用数字排序方式对 {len(group_messages)} 条消息进行排序")
-        except (ValueError, TypeError):
-            # 如果无法转换为数字，则按字符串排序
-            group_messages.sort(key=lambda x: str(x["message_id"]))
-            logger.debug(f"使用字符串排序方式对 {len(group_messages)} 条消息进行排序")
+        # 按照消息ID排序，确保顺序正确
+        group_messages.sort(key=lambda x: int(x.get("message_id", 0)))
         
-        # 构建重组后的媒体组
+        # 构建结果
         result = []
         for message in group_messages:
-            msg_id = message["message_id"]
-            metadata = message["metadata"]
-            file_path = message["file_path"]
+            # 提取必要信息
+            message_type = message.get("message_type", "unknown")
+            file_path = message.get("file_path", "")
             
-            # 获取媒体类型
-            message_type = metadata.get("message_type")
-            
-            # 构建媒体项
-            media_item = {
-                "message_id": msg_id,
+            result_item = {
+                "message_id": message.get("message_id"),
+                "chat_id": message.get("chat_id"),
+                "media_group_id": group_id,
                 "type": message_type,
                 "file_path": file_path,
-                "media_group_id": group_id,
+                "metadata": message
             }
             
-            # 添加其他元数据
-            for key, value in metadata.items():
-                if key not in media_item and value is not None:
-                    media_item[key] = value
+            # 添加特定类型的属性
+            if message_type == "photo":
+                result_item["photo"] = {"file_path": file_path}
+            elif message_type == "video":
+                result_item["video"] = {"file_path": file_path}
+            elif message_type == "document":
+                result_item["document"] = {"file_path": file_path}
+            elif message_type == "audio":
+                result_item["audio"] = {"file_path": file_path}
             
-            result.append(media_item)
+            # 添加标题
+            if "caption" in message:
+                result_item["caption"] = message["caption"]
+            
+            result.append(result_item)
         
         # 设置第一条消息的标题
         if result and "caption" in result[0].get("metadata", {}):
@@ -299,6 +369,26 @@ class MessageAssembler:
             logger.debug(f"媒体组消息 {i+1}: ID={item['message_id']}, 类型={item.get('type')}, 文件路径={item.get('file_path')}")
         
         return result
+
+    def _get_file_type(self, filename: str) -> str:
+        """
+        根据文件扩展名判断文件类型
+        
+        Args:
+            filename: 文件名
+            
+        Returns:
+            str: 文件类型
+        """
+        lower_name = filename.lower()
+        if lower_name.endswith(('.jpg', '.jpeg', '.png', '.webp')):
+            return "photo"
+        elif lower_name.endswith(('.mp4', '.avi', '.mov', '.mkv')):
+            return "video"
+        elif lower_name.endswith(('.mp3', '.m4a', '.wav', '.ogg', '.flac')):
+            return "audio"
+        else:
+            return "document"
     
     def assemble_single_message(self, message_id: str) -> Optional[Dict[str, Any]]:
         """

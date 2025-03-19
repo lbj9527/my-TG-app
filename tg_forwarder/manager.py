@@ -345,15 +345,23 @@ class ForwardManager:
                     logger.info("初始化媒体上传器临时客户端...")
                     await media_uploader.initialize()
                     
-                    # 创建任务队列
-                    task_queue = TaskQueue(max_queue_size=upload_config.get("concurrent_uploads", 3))
+                    # 创建共享队列，用于连接下载和上传流程
+                    download_upload_queue = asyncio.Queue(maxsize=10)
                     
-                    logger.info("开始下载和上传任务...")
+                    # 创建媒体处理流水线的控制标志
+                    pipeline_control = {
+                        "downloading_complete": False,
+                        "processed_items": set(),  # 用于跟踪已处理项目，避免重复转发
+                        "download_count": 0,
+                        "upload_count": 0
+                    }
                     
-                    # 定义生产者函数：获取消息并完成下载任务
-                    async def producer_func():
+                    logger.info("开始下载和上传并行处理流水线...")
+                    
+                    # 定义下载生产者函数
+                    async def download_producer_func():
                         try:
-                            # 获取并处理消息
+                            # 获取消息批次
                             async for batch in message_fetcher.get_messages(
                                 source_identifier, 
                                 start_message_id, 
@@ -361,36 +369,148 @@ class ForwardManager:
                             ):
                                 logger.info(f"获取到批次 {batch['id']}, 开始下载处理")
                                 
-                                # 下载媒体文件
-                                download_result = await media_downloader.download_media_batch(batch)
+                                # 按媒体组处理，而不是整个批次
+                                media_groups = batch.get("media_groups", [])
+                                single_messages = batch.get("single_messages", [])
                                 
-                                # 将下载结果和原始批次一起加入队列
-                                if download_result.get("success", 0) > 0:
-                                    download_task = {
-                                        "batch_id": batch.get("id"),
-                                        "batch": batch,
-                                        "download_result": download_result,
+                                # 处理媒体组 (media_groups是列表而非字典)
+                                for group_index, group_messages in enumerate(media_groups):
+                                    # 从第一个消息获取媒体组ID
+                                    if group_messages and len(group_messages) > 0:
+                                        first_message = group_messages[0]
+                                        group_id = first_message.media_group_id if hasattr(first_message, "media_group_id") else f"group_{group_index}"
+                                        logger.info(f"开始下载媒体组 {group_id}，包含 {len(group_messages)} 个文件")
+                                        
+                                        # 为该媒体组创建一个小批次
+                                        group_batch = {
+                                            "id": f"group_{group_id}",
+                                            "parent_batch_id": batch.get("id"),
+                                            "media_groups": [group_messages],  # 使用列表包装
+                                            "messages": [],
+                                            "progress": batch.get("progress", 0)
+                                        }
+                                        
+                                        # 下载这个媒体组的所有文件
+                                        download_result = await media_downloader.download_media_batch(group_batch)
+                                        
+                                        # 如果下载成功，立即添加到上传队列
+                                        if download_result.get("success", 0) > 0:
+                                            download_task = {
+                                                "batch_id": group_batch.get("id"),
+                                                "batch": group_batch,
+                                                "download_result": download_result,
+                                                "progress": group_batch.get("progress", 0)
+                                            }
+                                            
+                                            await download_upload_queue.put(download_task)
+                                            pipeline_control["download_count"] += 1
+                                            logger.info(f"媒体组 {group_id} 下载完成并进入上传流水线，共 {download_result.get('success', 0)} 个文件")
+                                        else:
+                                            logger.warning(f"媒体组 {group_id} 下载失败或无内容，跳过上传")
+                                
+                                # 处理单条消息（每条消息作为一个任务）
+                                for message in single_messages:
+                                    message_id = message.get("message_id", "unknown")
+                                    logger.info(f"开始下载单条消息 {message_id}")
+                                    
+                                    # 为单条消息创建一个小批次
+                                    message_batch = {
+                                        "id": f"message_{message_id}",
+                                        "parent_batch_id": batch.get("id"),
+                                        "media_groups": {},
+                                        "messages": [message],
                                         "progress": batch.get("progress", 0)
                                     }
                                     
-                                    # 入队下载结果，等待上传
-                                    await task_queue.put(download_task)
-                                    logger.info(f"批次 {batch['id']} 下载完成并入队，等待上传，进度: {batch['progress']:.2f}%")
-                                else:
-                                    logger.warning(f"批次 {batch['id']} 下载失败或无内容，跳过上传")
+                                    # 下载这条消息
+                                    download_result = await media_downloader.download_media_batch(message_batch)
+                                    
+                                    # 如果下载成功，立即添加到上传队列
+                                    if download_result.get("success", 0) > 0:
+                                        download_task = {
+                                            "batch_id": message_batch.get("id"),
+                                            "batch": message_batch,
+                                            "download_result": download_result,
+                                            "progress": message_batch.get("progress", 0)
+                                        }
+                                        
+                                        await download_upload_queue.put(download_task)
+                                        pipeline_control["download_count"] += 1
+                                        logger.info(f"消息 {message_id} 下载完成并进入上传流水线")
+                                    else:
+                                        logger.warning(f"消息 {message_id} 下载失败或无内容，跳过上传")
+                                        
+                                logger.info(f"批次 {batch['id']} 所有媒体组和单条消息处理完成")
+                                
                         except Exception as e:
-                            logger.error(f"生产者(下载)任务出错: {str(e)}")
+                            logger.error(f"下载生产者任务出错: {str(e)}")
+                            import traceback
+                            logger.error(f"错误详情: {traceback.format_exc()}")
+                        finally:
+                            # 标记下载完成
+                            pipeline_control["downloading_complete"] = True
+                            logger.info(f"所有下载任务完成，总计下载 {pipeline_control['download_count']} 个项目")
                     
-                    # 定义消费者函数：只处理上传任务
-                    async def consumer_func(download_task):
+                    # 定义上传生产者函数
+                    async def upload_producer_func(upload_queue):
+                        try:
+                            while not (pipeline_control["downloading_complete"] and download_upload_queue.empty()):
+                                try:
+                                    # 使用超时获取，允许检查循环终止条件
+                                    download_task = await asyncio.wait_for(download_upload_queue.get(), timeout=1.0)
+                                    
+                                    # 将下载任务放入上传队列
+                                    await upload_queue.put(download_task)
+                                    
+                                    # 标记队列任务完成
+                                    download_upload_queue.task_done()
+                                    
+                                except asyncio.TimeoutError:
+                                    # 超时只是为了检查条件，继续循环
+                                    continue
+                                except Exception as e:
+                                    logger.error(f"上传生产者处理任务时出错: {str(e)}")
+                        except Exception as e:
+                            logger.error(f"上传生产者任务出错: {str(e)}")
+                            import traceback
+                            logger.error(f"错误详情: {traceback.format_exc()}")
+                    
+                    # 定义上传消费者函数
+                    async def upload_consumer_func(download_task):
                         try:
                             batch_id = download_task.get("batch_id")
                             download_result = download_task.get("download_result")
                             
+                            # 检查是否已处理过该批次，避免重复转发
+                            if batch_id in pipeline_control["processed_items"]:
+                                logger.info(f"批次 {batch_id} 已处理过，跳过")
+                                return True
+                            
                             logger.info(f"开始处理批次 {batch_id} 的上传任务")
                             
+                            # 获取下载文件列表
+                            files = download_result.get("files", [])
+                            if not files:
+                                logger.warning(f"批次 {batch_id} 没有可用文件，跳过上传")
+                                return True
+                                
+                            # 记录下载的文件信息，用于调试
+                            logger.debug(f"准备组装批次 {batch_id} 的 {len(files)} 个文件")
+                            if files:
+                                for i, file in enumerate(files[:3]):
+                                    logger.debug(f"文件 {i+1}: message_id={file.get('message_id')}, " +
+                                               f"media_group_id={file.get('media_group_id')}, " + 
+                                               f"file_path={file.get('file_path', '')[-30:]}")
+                                if len(files) > 3:
+                                    logger.debug(f"... 等共 {len(files)} 个文件")
+                            
                             # 重组消息
-                            assembled_data = message_assembler.assemble_batch(download_result.get("files", []))
+                            assembled_data = message_assembler.assemble_batch(files)
+                            
+                            # 记录重组结果
+                            media_groups = assembled_data.get("media_groups", [])
+                            single_messages = assembled_data.get("single_messages", [])
+                            logger.info(f"重组结果: {len(media_groups)} 个媒体组, {len(single_messages)} 条单独消息")
                             
                             # 上传重组后的消息
                             upload_result = await media_uploader.upload_batch(assembled_data)
@@ -400,8 +520,13 @@ class ForwardManager:
                             result["success"] += upload_result.get("success_total", 0)
                             result["failed"] += upload_result.get("failed_total", 0)
                             
+                            # 标记该批次已处理
+                            pipeline_control["processed_items"].add(batch_id)
+                            pipeline_control["upload_count"] += 1
+                            
                             logger.info(f"批次 {batch_id} 上传完成，成功: {upload_result.get('success_total', 0)}，" +
-                                       f"失败: {upload_result.get('failed_total', 0)}")
+                                      f"失败: {upload_result.get('failed_total', 0)}，" +
+                                      f"已完成: {pipeline_control['upload_count']}/{pipeline_control['download_count']}")
                             
                             return {
                                 "batch_id": batch_id,
@@ -409,23 +534,80 @@ class ForwardManager:
                                 "upload": upload_result
                             }
                         except Exception as e:
-                            logger.error(f"消费者(上传)任务出错: {str(e)}")
+                            logger.error(f"上传消费者任务出错: {str(e)}")
+                            import traceback
+                            logger.error(f"错误详情: {traceback.format_exc()}")
                             return False
                     
-                    # 启动任务队列
-                    task_stats = await task_queue.start(
-                        producer_func=producer_func,
-                        consumer_func=consumer_func,
-                        num_consumers=upload_config.get("concurrent_uploads", 3)
+                    # 创建下载任务
+                    download_task = asyncio.create_task(download_producer_func())
+                    
+                    # 创建上传任务队列
+                    upload_queue = TaskQueue(
+                        max_queue_size=upload_config.get("concurrent_uploads", 3), 
+                        max_workers=upload_config.get("concurrent_uploads", 3)
                     )
+                    
+                    # 启动上传任务队列
+                    upload_task = asyncio.create_task(
+                        upload_queue.run(
+                            lambda queue=upload_queue: upload_producer_func(queue),
+                            upload_consumer_func
+                        )
+                    )
+                    
+                    # 等待下载任务和上传任务完成
+                    try:
+                        # 增加超时保护，避免无限等待
+                        download_future = asyncio.ensure_future(download_task)
+                        upload_future = asyncio.ensure_future(upload_task)
+                        
+                        # 设置最大等待时间（根据任务量可调整）
+                        max_wait_time = 3600  # 1小时
+                        
+                        # 等待所有任务完成或超时
+                        await asyncio.wait(
+                            [download_future, upload_future],
+                            timeout=max_wait_time,
+                            return_when=asyncio.ALL_COMPLETED
+                        )
+                        
+                        # 检查是否有任务因超时未完成
+                        if not download_future.done():
+                            logger.warning("下载任务执行超时，强制结束")
+                            download_future.cancel()
+                        
+                        if not upload_future.done():
+                            logger.warning("上传任务执行超时，强制结束")
+                            upload_future.cancel()
+                            
+                        # 检查任务是否有异常
+                        for future, name in [(download_future, "下载"), (upload_future, "上传")]:
+                            if future.done() and not future.cancelled():
+                                try:
+                                    future.result()
+                                except Exception as e:
+                                    logger.error(f"{name}任务执行出错: {str(e)}")
+                        
+                        # 确保下载完成标志已设置，防止上传队列死锁
+                        pipeline_control["downloading_complete"] = True
+                        
+                    except asyncio.TimeoutError:
+                        logger.error("等待下载和上传任务完成超时")
+                        pipeline_control["downloading_complete"] = True
+                    except Exception as e:
+                        logger.error(f"等待任务完成时出错: {str(e)}")
+                        pipeline_control["downloading_complete"] = True
                     
                     # 更新结果统计
                     result.update({
-                        "task_stats": task_stats,
+                        "download_count": pipeline_control["download_count"],
+                        "upload_count": pipeline_control["upload_count"],
                         "error": None
                     })
                     
-                    logger.info(f"下载上传任务完成，总计处理: {result.get('processed')} 条，"
+                    logger.info(f"下载上传流水线任务完成，总计下载: {result.get('download_count')} 批次，"
+                               f"总计上传: {result.get('upload_count')} 批次，"
                                f"成功: {result.get('success')} 条，失败: {result.get('failed')} 条")
                 
                 except Exception as e:

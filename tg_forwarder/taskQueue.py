@@ -74,28 +74,43 @@ class TaskQueue:
             self.consumer_tasks.append(consumer_task)
             logger.info(f"消费者 #{consumer_id} 开始运行...")
         
-        # 等待生产者完成
-        await self.producer_task
-        logger.info("所有生产者任务已完成")
+        try:
+            # 等待生产者和消费者完成
+            await self.producer_task
+            logger.info("生产者任务已完成")
+            
+            # 向每个消费者发送结束信号
+            for _ in range(len(self.consumer_tasks)):
+                await self.queue.put(None)
+            
+            # 等待所有消费者处理完毕
+            await asyncio.gather(*self.consumer_tasks)
+            logger.info("所有消费者任务已完成")
+            
+        except Exception as e:
+            logger.error(f"任务队列执行错误: {str(e)}")
+            import traceback
+            logger.error(f"错误详情: {traceback.format_exc()}")
+            
+            # 取消所有未完成的任务
+            if not self.producer_task.done():
+                self.producer_task.cancel()
+            
+            for task in self.consumer_tasks:
+                if not task.done():
+                    task.cancel()
         
-        # 向每个消费者发送结束信号
-        for _ in range(len(self.consumer_tasks)):
-            await self.queue.put(None)
-        
-        # 等待所有消费者完成
-        await asyncio.gather(*self.consumer_tasks)
-        logger.info("所有消费者任务已完成")
-        
-        self.is_running = False
-        self.stats["end_time"] = time.time()
-        duration = self.stats["end_time"] - self.stats["start_time"]
-        
-        # 生成任务统计
-        logger.info(f"任务队列统计: 入队 {self.stats['enqueued']}, 出队 {self.stats['dequeued']}, " +
-                   f"完成 {self.stats['completed']}, 失败 {self.stats['failed']}, " +
-                   f"耗时 {duration:.2f}秒")
-        
-        return self.stats
+        finally:
+            self.is_running = False
+            self.stats["end_time"] = time.time()
+            duration = self.stats["end_time"] - self.stats["start_time"]
+            
+            # 生成任务统计
+            logger.info(f"任务队列统计: 入队 {self.stats['enqueued']}, 出队 {self.stats['dequeued']}, " +
+                      f"完成 {self.stats['completed']}, 失败 {self.stats['failed']}, " +
+                      f"耗时 {duration:.2f}秒")
+            
+            return self.stats
     
     async def _producer_wrapper(self, producer_func: Callable[[], Awaitable[None]]) -> None:
         """

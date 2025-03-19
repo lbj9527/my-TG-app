@@ -92,6 +92,12 @@ class MediaDownloader:
         
         # 加载现有元数据
         self._load_metadata()
+        
+        # 初始化已下载消息集合
+        self.downloaded_messages = set()
+        
+        # 加载已下载消息记录
+        self._load_downloaded_messages()
     
     def _load_metadata(self) -> None:
         """加载现有元数据"""
@@ -149,78 +155,86 @@ class MediaDownloader:
             import traceback
             logger.debug(f"错误详情: {traceback.format_exc()}")
     
-    async def download_media_batch(self, data: Dict[str, Any]) -> Dict[str, Any]:
+    async def download_media_batch(self, batch: Dict[str, Any]) -> Dict[str, Any]:
         """
-        下载一批媒体文件
-        
+        下载一个批次中的所有媒体文件
+
         Args:
-            data: 任务数据，包含媒体组和单条消息
-            
+            batch: 包含媒体信息的批次
+
         Returns:
-            Dict[str, Any]: 下载结果
+            Dict[str, Any]: 下载结果统计
         """
-        start_time = time.time()
+        # 提取所有需要下载的消息
+        all_messages = []
         
-        # 提取媒体组和单条消息
-        media_groups = data.get("media_groups", [])
-        single_messages = data.get("single_messages", [])
+        # 从媒体组中提取消息 (media_groups是列表结构)
+        media_groups = batch.get("media_groups", [])
+        if media_groups:
+            for group in media_groups:
+                if isinstance(group, list):
+                    all_messages.extend(group)
         
-        # 创建下载任务
-        tasks = []
+        # 添加单条消息
+        all_messages.extend(batch.get("single_messages", []) or batch.get("messages", []))
         
-        # 处理媒体组
-        for media_group in media_groups:
-            if not media_group:
+        # 如果没有消息需要下载，直接返回
+        if not all_messages:
+            return {"success": 0, "failed": 0, "files": []}
+        
+        logger.info(f"开始并行下载 {len(all_messages)} 个文件...")
+        
+        # 准备下载任务
+        download_tasks = []
+        for message in all_messages:
+            # 检查消息是否已下载过 (通过获取属性而不是get方法)
+            message_id = message.id if hasattr(message, "id") else 0
+            chat_id = message.chat.id if hasattr(message, "chat") else 0
+            
+            if self._is_message_downloaded(chat_id, message_id):
+                logger.debug(f"消息已下载过: {chat_id}_{message_id}")
                 continue
             
-            group_id = None
-            for msg in media_group:
-                if hasattr(msg, "media_group_id") and msg.media_group_id:
-                    group_id = msg.media_group_id
-                    break
+            # 添加下载任务
+            download_tasks.append(self._process_message_media(message))
+        
+        # 使用信号量控制并发数量
+        semaphore = asyncio.Semaphore(self.concurrent_downloads)
+        
+        # 定义包装函数，应用信号量控制
+        async def download_with_semaphore(task):
+            async with semaphore:
+                return await task
+        
+        # 并行执行所有下载任务
+        results = []
+        if download_tasks:
+            # 将所有任务包装在信号量中
+            bounded_tasks = [download_with_semaphore(task) for task in download_tasks]
             
-            # 创建每个消息的下载任务
-            for msg in media_group:
-                # 存储消息元数据
-                self._store_message_metadata(msg, group_id)
-                
-                # 检查消息是否包含可下载媒体
-                if self._has_downloadable_media(msg):
-                    tasks.append(self._download_media_file(msg, group_id))
+            # 使用as_completed同时获取完成的任务结果
+            for future in asyncio.as_completed(bounded_tasks):
+                try:
+                    result = await future
+                    if result:
+                        results.append(result)
+                except Exception as e:
+                    logger.error(f"下载任务执行异常: {str(e)}")
         
-        # 处理单条消息
-        for msg in single_messages:
-            if not msg:
-                continue
-            
-            # 存储消息元数据
-            self._store_message_metadata(msg)
-            
-            # 检查消息是否包含可下载媒体
-            if self._has_downloadable_media(msg):
-                tasks.append(self._download_media_file(msg))
+        # 分类统计下载结果
+        success_files = [item for item in results if item and "error" not in item]
+        failed_files = [item for item in results if item and "error" in item]
         
-        # 并行下载所有文件
-        logger.info(f"开始并行下载 {len(tasks)} 个文件...")
-        results = await asyncio.gather(*tasks, return_exceptions=True)
+        # 保存下载记录
+        for item in success_files:
+            self._mark_message_downloaded(item.get("chat_id"), item.get("message_id"))
         
-        # 保存元数据
-        self._save_metadata()
+        logger.info(f"批次下载完成: 成功 {len(success_files)}, 失败 {len(failed_files)}")
         
-        # 统计结果
-        success_count = sum(1 for r in results if isinstance(r, dict) and r.get("success"))
-        failed_count = len(tasks) - success_count
-        
-        duration = time.time() - start_time
-        
-        # 返回结果
         return {
-            "batch_id": data.get("id", "unknown"),
-            "total": len(tasks),
-            "success": success_count,
-            "failed": failed_count,
-            "duration": duration,
-            "files": [r for r in results if isinstance(r, dict)]
+            "success": len(success_files),
+            "failed": len(failed_files),
+            "files": success_files
         }
     
     async def _download_media_file(self, message: Message, group_id: str = None) -> Dict[str, Any]:
@@ -251,7 +265,10 @@ class MediaDownloader:
                 logger.debug(f"文件已存在，跳过下载: {file_path}")
                 return {
                     "message_id": message_id,
+                    "chat_id": chat_id,
+                    "media_group_id": group_id or (message.media_group_id if hasattr(message, "media_group_id") else None),
                     "file_path": file_path,
+                    "file_name": file_name,
                     "success": True,
                     "duration": 0,
                     "file_size": os.path.getsize(file_path) if os.path.exists(file_path) else 0,
@@ -271,16 +288,25 @@ class MediaDownloader:
                         duration = time.time() - start_time
                         file_size = os.path.getsize(file_path) if os.path.exists(file_path) else 0
                         
+                        # 确保message_id是字符串
+                        str_message_id = str(message_id)
+                        
                         # 更新下载映射
-                        self.download_mapping[str(message_id)] = file_path
+                        self.download_mapping[str_message_id] = file_path
                         self.processed_files.add(file_path)
                         
+                        # 保存更新的映射
+                        self._save_metadata()
+                        
                         logger.info(f"下载成功: {file_name} ({file_size/1024:.1f} KB, {duration:.1f}秒)")
+                        
+                        # 返回包含媒体组ID的结果
+                        media_group_id = group_id or (message.media_group_id if hasattr(message, "media_group_id") else None)
                         
                         return {
                             "message_id": message_id,
                             "chat_id": chat_id,
-                            "media_group_id": group_id or (message.media_group_id if hasattr(message, "media_group_id") else None),
+                            "media_group_id": media_group_id,
                             "file_path": file_path,
                             "file_name": file_name,
                             "success": True,
@@ -402,11 +428,20 @@ class MediaDownloader:
         msg_id = message.id
         chat_id = message.chat.id if hasattr(message, "chat") and message.chat else None
         
+        # 确定媒体组ID - 优先使用传入的group_id，其次使用消息自带的media_group_id
+        media_group_id = None
+        if group_id:
+            media_group_id = group_id
+            logger.debug(f"使用传入的媒体组ID: {group_id} (消息ID: {msg_id})")
+        elif hasattr(message, "media_group_id") and message.media_group_id:
+            media_group_id = message.media_group_id
+            logger.debug(f"使用消息自带的媒体组ID: {media_group_id} (消息ID: {msg_id})")
+        
         metadata = {
             "message_id": msg_id,
             "chat_id": chat_id,
             "date": message.date.timestamp() if hasattr(message, "date") and message.date else time.time(),
-            "media_group_id": group_id or (message.media_group_id if hasattr(message, "media_group_id") else None),
+            "media_group_id": media_group_id,
             "message_type": self._get_message_type(message),
             "caption": message.caption if hasattr(message, "caption") else None,
             "caption_entities": [entity_to_dict(entity) for entity in message.caption_entities] if hasattr(message, "caption_entities") and message.caption_entities else None,
@@ -447,8 +482,17 @@ class MediaDownloader:
                 "file_size": message.photo.file_size
             })
         
+        # 将消息ID转为字符串作为键
+        str_msg_id = str(msg_id)
+        
         # 存储元数据
-        self.message_metadata[str(msg_id)] = metadata
+        self.message_metadata[str_msg_id] = metadata
+        
+        # 记录添加的元数据
+        logger.debug(f"已存储消息 {msg_id} 的元数据，媒体组ID: {media_group_id}, 类型: {metadata['message_type']}")
+        
+        # 保存元数据到文件
+        self._save_metadata()
     
     def _get_message_type(self, message: Message) -> str:
         """
@@ -483,4 +527,99 @@ class MediaDownloader:
         elif hasattr(message, "poll") and message.poll:
             return "poll"
         else:
-            return "unknown" 
+            return "unknown"
+    
+    async def _process_message_media(self, message) -> Dict[str, Any]:
+        """
+        处理单个消息的媒体文件下载
+        
+        Args:
+            message: 消息数据（Pyrogram Message对象）
+            
+        Returns:
+            Dict[str, Any]: 下载结果
+        """
+        try:
+            # 获取消息基本信息（直接访问属性而不是使用get方法）
+            message_id = message.id if hasattr(message, "id") else 0
+            chat_id = message.chat.id if hasattr(message, "chat") else 0
+            group_id = message.media_group_id if hasattr(message, "media_group_id") else None
+            
+            # 存储消息元数据
+            self._store_message_metadata(message, group_id)
+            
+            # 检查消息是否包含可下载媒体
+            if not self._has_downloadable_media(message):
+                logger.debug(f"消息 {chat_id}_{message_id} 不包含可下载媒体")
+                return None
+            
+            # 下载媒体文件
+            result = await self._download_media_file(message, group_id)
+            return result
+            
+        except Exception as e:
+            logger.error(f"处理消息媒体出错: {str(e)}")
+            import traceback
+            logger.error(f"错误详情: {traceback.format_exc()}")
+            message_id = message.id if hasattr(message, "id") else "unknown"
+            chat_id = message.chat.id if hasattr(message, "chat") else "unknown"
+            return {"error": str(e), "message_id": message_id, "chat_id": chat_id}
+    
+    def _is_message_downloaded(self, chat_id, message_id) -> bool:
+        """
+        检查消息是否已经下载过
+        
+        Args:
+            chat_id: 聊天ID
+            message_id: 消息ID
+            
+        Returns:
+            bool: 是否已下载
+        """
+        key = f"{chat_id}_{message_id}"
+        return key in self.downloaded_messages
+        
+    def _mark_message_downloaded(self, chat_id, message_id) -> None:
+        """
+        标记消息已下载
+        
+        Args:
+            chat_id: 聊天ID
+            message_id: 消息ID
+        """
+        key = f"{chat_id}_{message_id}"
+        self.downloaded_messages.add(key)
+        
+        # 定期保存下载状态
+        if len(self.downloaded_messages) % 10 == 0:
+            self._save_downloaded_messages()
+    
+    def _save_downloaded_messages(self) -> None:
+        """
+        保存已下载消息记录到文件
+        """
+        try:
+            download_record_path = os.path.join(self.temp_folder, "downloaded_messages.json")
+            with open(download_record_path, 'w', encoding='utf-8') as f:
+                json.dump(list(self.downloaded_messages), f)
+            logger.debug(f"已保存下载记录，共 {len(self.downloaded_messages)} 条消息")
+        except Exception as e:
+            logger.error(f"保存下载记录失败: {str(e)}")
+    
+    def _load_downloaded_messages(self) -> None:
+        """
+        从文件加载已下载消息记录
+        """
+        try:
+            download_record_path = os.path.join(self.temp_folder, "downloaded_messages.json")
+            if os.path.exists(download_record_path):
+                with open(download_record_path, 'r', encoding='utf-8') as f:
+                    records = json.load(f)
+                    self.downloaded_messages = set(records)
+                logger.info(f"已加载下载记录，共 {len(self.downloaded_messages)} 条消息")
+            else:
+                logger.info("下载记录文件不存在，创建新记录")
+                self.downloaded_messages = set()
+        except Exception as e:
+            logger.error(f"加载下载记录失败: {str(e)}")
+            self.downloaded_messages = set() 
