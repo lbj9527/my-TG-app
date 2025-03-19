@@ -372,28 +372,6 @@ class TelegramClient:
             else:
                 # 其他ValueError重新抛出
                 raise
- 
-
-    async def handle_updates(self):
-        """
-        处理Telegram更新
-        重写此方法以增加错误处理，防止Peer ID无效错误导致程序崩溃
-        """
-        try:
-            # 调用原始方法
-            await super().handle_updates()
-        except ValueError as e:
-            if "Peer id invalid" in str(e):
-                # 记录错误但不中断程序
-                logger.warning(f"处理更新时遇到无效的Peer ID: {str(e)}")
-            else:
-                # 其他ValueError重新抛出
-                raise
-        except Exception as e:
-            # 记录其他异常但不终止程序
-            logger.error(f"处理更新时发生错误: {str(e)}")
-            import traceback
-            logger.debug(f"错误详情: {traceback.format_exc()}")
         except Exception as e:
             # 记录其他异常但不终止程序
             logger.error(f"处理更新时发生错误: {str(e)}")
