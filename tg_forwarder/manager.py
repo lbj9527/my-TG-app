@@ -542,7 +542,7 @@ class ForwardManager:
                     # 创建媒体上传器
                     media_uploader = MediaUploader(
                         client=self.client,
-                        target_channels=sorted_targets,
+                        target_channels=real_target_ids,
                         temp_folder=download_config["temp_folder"],
                         wait_time=upload_config["wait_between_messages"],
                         retry_count=upload_config["retry_count"] if "retry_count" in upload_config else download_config["retry_count"],
