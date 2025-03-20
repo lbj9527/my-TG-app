@@ -199,24 +199,38 @@ class ForwardManager:
             logger.info(f"自动选择 {source_identifier} 作为源频道")
             logger.info(f"有效目标频道: {', '.join(map(str, valid_channels))}")
             
-            # 解析源频道
-            source_identifier, _ = parse_channel(source_identifier)
-            target_identifiers = [parse_channel(ch)[0] for ch in valid_channels]
+            # 使用从验证结果获取的channel_id，确保标识符有效
+            source_identifiers_map = {}
+            for channel in valid_channels:
+                channel_result = result["details"].get(channel, {})
+                if channel_result.get("valid") and channel_result.get("channel_id"):
+                    source_identifiers_map[channel] = channel_result["channel_id"]
+            
+            # 更新target_identifiers使用验证过的channel_id
+            target_identifiers = [source_identifiers_map.get(ch, ch) for ch in valid_channels]
             
         else:
             # 验证源频道
             logger.info(f"验证源频道: {source_channel}")
             source_result = await self.channel_utils.validate_channel(source_channel)
             
+            # 增加更详细的日志输出
+            logger.debug(f"源频道验证结果: {source_result}")
+            
             if not source_result["valid"]:
                 error_msg = source_result["error"] or "未知错误"
                 logger.error(f"源频道 {source_channel} 无效: {error_msg}")
-                return None, [], {}
+                return None, [], {"error": f"源频道无效: {error_msg}", "success_flag": False}
             
-            logger.info(f"源频道 {source_channel} 有效")
+            # 再次检查channel_id是否有效
+            if not source_result.get("channel_id"):
+                logger.error(f"源频道 {source_channel} 虽然被标记为有效，但没有获取到有效的channel_id")
+                return None, [], {"error": "未能获取有效的源频道ID", "success_flag": False}
+                
+            logger.info(f"源频道 {source_channel} 有效，ID: {source_result['channel_id']}, 标题: {source_result.get('title', '未知')}")
             
-            # 解析源频道
-            source_identifier, _ = parse_channel(source_channel)
+            # 使用从验证结果获取的channel_id，而不是再次解析
+            source_identifier = source_result["channel_id"]
             
             # 从目标列表中移除源频道
             target_identifiers = []
@@ -371,6 +385,15 @@ class ForwardManager:
         try:
             # 解析频道信息
             source_identifier, target_identifiers, extra_configs = await self.parse_channels()
+            
+            # 检查是否有错误结果返回
+            if isinstance(extra_configs, dict) and "error" in extra_configs:
+                logger.error(f"频道解析失败: {extra_configs.get('error')}")
+                return {
+                    "success_flag": False, 
+                    "error": extra_configs.get('error', "频道解析失败")
+                }
+            
             if not source_identifier:
                 error_result = {"success_flag": False, "error": "无法找到有效的源频道"}
                 return error_result
@@ -382,6 +405,85 @@ class ForwardManager:
             # 预检查频道状态并排序目标频道
             source_allow_forward, sorted_targets = await self.prepare_channels(source_identifier, target_identifiers)
             
+            #获取源频道和目标频道的真实ID
+            logger.info("获取源频道和目标频道的真实ID...")
+            real_source_id = None
+            real_target_ids = []
+            
+            try:
+                # 检查源频道是否存在并获取真实ID
+                try:
+                    # 先检查是否已经是数字ID
+                    if isinstance(source_identifier, int) or (isinstance(source_identifier, str) and source_identifier.isdigit()):
+                        real_source_id = int(source_identifier)
+                        logger.info(f"源频道已经是数字ID: {real_source_id}")
+                    else:
+                        # 处理特殊链接格式
+                        if isinstance(source_identifier, str) and ('/' in source_identifier or '+' in source_identifier):
+                            logger.info(f"处理特殊格式的源频道链接: {source_identifier}")
+                            # 如果是链接格式且包含消息ID，先尝试获取频道信息
+                            actual_channel = self.channel_utils.get_actual_chat_id(source_identifier)
+                            logger.debug(f"解析后的实际频道标识符: {actual_channel}")
+                        else:
+                            actual_channel = source_identifier
+                        
+                        # 尝试获取实体
+                        source_entity = await self.client.get_entity(actual_channel)
+                        if not source_entity:
+                            error_result = {"success_flag": False, "error": f"源频道不存在或无法访问: {source_identifier}"}
+                            logger.error(f"源频道不存在或无法访问: {source_identifier}")
+                            return error_result
+                        
+                        # 获取真实的源频道ID
+                        real_source_id = source_entity.id
+                        logger.info(f"已获取源频道真实ID: {source_identifier} -> {real_source_id} (标题: {getattr(source_entity, 'title', '未知')})")
+                except Exception as e:
+                    error_result = {"success_flag": False, "error": f"获取源频道实体时出错: {str(e)}"}
+                    logger.error(f"获取源频道实体时出错: {str(e)}")
+                    logger.debug(f"出错的源频道标识符: {source_identifier}, 类型: {type(source_identifier)}")
+                    return error_result
+                
+                # 检查目标频道是否存在并获取真实ID
+                for target in sorted_targets:
+                    try:
+                        # 先检查是否已经是数字ID
+                        if isinstance(target, int) or (isinstance(target, str) and target.isdigit()):
+                            real_target_id = int(target)
+                            real_target_ids.append(real_target_id)
+                            logger.info(f"目标频道已经是数字ID: {real_target_id}")
+                            continue
+                            
+                        # 处理特殊链接格式
+                        if isinstance(target, str) and ('/' in target or '+' in target):
+                            logger.info(f"处理特殊格式的目标频道链接: {target}")
+                            # 如果是链接格式且包含消息ID，先尝试获取频道信息
+                            actual_target = self.channel_utils.get_actual_chat_id(target)
+                            logger.debug(f"解析后的实际目标频道标识符: {actual_target}")
+                        else:
+                            actual_target = target
+                        
+                        # 尝试获取实体
+                        target_entity = await self.client.get_entity(actual_target)
+                        if target_entity:
+                            # 保存真实的chat ID而不是原始标识符
+                            real_target_ids.append(target_entity.id)
+                            logger.info(f"已获取目标频道真实ID: {target} -> {target_entity.id} (标题: {getattr(target_entity, 'title', target)})")
+                        else:
+                            logger.warning(f"目标频道不存在或无法访问: {target}")
+                    except Exception as e:
+                        logger.warning(f"获取目标频道 {target} 真实ID时出错: {str(e)[:100]}")
+                        logger.debug(f"出错的目标频道标识符: {target}, 类型: {type(target)}")
+                
+                if not real_target_ids:
+                    error_result = {"success_flag": False, "error": "没有有效的目标频道"}
+                    logger.error("没有有效的目标频道")
+                    return error_result
+                
+            except Exception as e:
+                error_result = {"success_flag": False, "error": f"获取频道真实ID时出错: {str(e)}"}
+                logger.error(f"获取频道真实ID时出错: {str(e)}")
+                return error_result
+            
             # 获取转发配置
             forward_config = self.config.get_forward_config()
             start_message_id = forward_config['start_message_id']
@@ -391,8 +493,8 @@ class ForwardManager:
             if source_allow_forward:
                 # 源频道允许转发，使用正常转发流程
                 result = await self.process_normal_forward(
-                    source_identifier,
-                    sorted_targets,
+                    real_source_id,  # 使用真实的源频道ID
+                    real_target_ids,  # 使用真实的目标频道ID列表
                     start_message_id,
                     end_message_id
                 )
@@ -469,8 +571,8 @@ class ForwardManager:
                         try:
                             # 获取消息批次
                             async for batch in message_fetcher.get_messages(
-                                source_identifier, 
-                                start_message_id, 
+                                real_source_id,  # 使用真实的源频道ID
+                                start_message_id,
                                 end_message_id
                             ):
                                 logger.info(f"获取到批次 {batch['id']}, 开始下载处理")

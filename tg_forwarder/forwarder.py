@@ -488,15 +488,18 @@ class MessageForwarder:
     
     def log_error_types(self, error_messages: List[str]) -> None:
         """
-        统计并记录错误类型
+        记录错误类型统计
         
         Args:
             error_messages: 错误消息列表
         """
+        if not error_messages:
+            return
+            
+        # 统计错误类型
         error_types = {}
         for msg in error_messages:
-            # 提取错误类型
-            if "触发频率限制" in msg:
+            if "频率限制" in msg:
                 error_type = "频率限制"
             elif "无权在目标频道" in msg:
                 error_type = "权限不足"
@@ -512,46 +515,6 @@ class MessageForwarder:
         for error_type, count in error_types.items():
             percentage = count / len(error_messages) * 100
             logger.warning(f"  - {error_type}: {count}条 ({percentage:.1f}%)")
-    
-    async def validate_channels(self, source_channel: Union[str, int], target_channels: List[Union[str, int]]) -> Tuple[int, List[int], Dict[str, Any]]:
-        """
-        验证源频道和目标频道，获取真实的频道ID
-        
-        Args:
-            source_channel: 源频道ID或用户名
-            target_channels: 目标频道ID或用户名列表
-            
-        Returns:
-            Tuple[int, List[int], Dict[str, Any]]: 
-            返回(源频道ID, 有效的目标频道ID列表, 错误信息字典)
-        """
-        # 检查频道是否存在
-        source_entity = await self.client.get_entity(source_channel)
-        if not source_entity:
-            error_msg = f"源频道不存在或无法访问: {source_channel}"
-            logger.error(error_msg)
-            return None, [], {"success": False, "error": error_msg}
-        
-        # 获取真实的源频道ID
-        source_chat_id = source_entity.id
-        
-        # 检查目标频道是否存在并获取真实ID
-        valid_targets = []
-        for target in target_channels:
-            target_entity = await self.client.get_entity(target)
-            if target_entity:
-                # 保存真实的chat ID而不是原始标识符
-                valid_targets.append(target_entity.id)
-                logger.info(f"已找到目标频道: {getattr(target_entity, 'title', target)} (ID: {target_entity.id})")
-            else:
-                logger.warning(f"目标频道不存在或无法访问: {target}")
-        
-        if not valid_targets:
-            error_msg = "没有有效的目标频道"
-            logger.error(error_msg)
-            return source_chat_id, [], {"success": False, "error": error_msg}
-        
-        return source_chat_id, valid_targets, {}
     
     async def process_messages(self, source_channel: Union[str, int], target_channels: List[Union[str, int]], 
                              start_id: Optional[int] = None, end_id: Optional[int] = None) -> Dict[str, Any]:
@@ -585,10 +548,9 @@ class MessageForwarder:
         
         logger.info(f"开始处理消息: 从 {start_id} 到 {end_id}")
         
-        # 验证源频道和目标频道
-        source_chat_id, valid_targets, error = await self.validate_channels(source_channel, target_channels)
-        if error:
-            return error
+        # 直接使用传入的源频道和目标频道ID
+        source_chat_id = source_channel
+        valid_targets = target_channels
         
         # 初始化统计信息
         stats = self.initialize_stats(start_id, end_id)

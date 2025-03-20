@@ -333,10 +333,21 @@ class ChannelUtils:
         """
         if isinstance(channel, str) and channel.startswith('https://t.me/'):
             username = channel.replace('https://t.me/', '')
+            
+            # 处理特殊格式的链接
             if '+' in username or 'joinchat' in username:
-                return channel  # 保持原样
+                return channel  # 私有频道链接保持原样
+            
+            # 处理带有消息ID的链接，如 https://t.me/xxzq6/3581
+            elif '/' in username:
+                username_parts = username.split('/')
+                if len(username_parts) >= 1:
+                    return '@' + username_parts[0]  # 返回格式化的用户名
+            
+            # 标准频道用户名
             else:
-                return username
+                return '@' + username
+        
         return channel
     
     def get_formatted_info(self, channel: str) -> str:
