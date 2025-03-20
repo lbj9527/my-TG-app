@@ -11,7 +11,7 @@ from pyrogram.errors import FloodWait
 import re
 
 from tg_forwarder.logModule.logger import get_logger
-from tg_forwarder.channel_parser import ChannelParser
+from tg_forwarder.channel_utils import parse_channel, format_channel, filter_channels, get_channel_utils
 # 导入公共工具函数
 from tg_forwarder.utils.common import get_client_instance
 

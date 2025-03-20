@@ -11,7 +11,7 @@ from pyrogram.errors import FloodWait, SlowmodeWait, ChannelPrivate, ChatForward
 
 from tg_forwarder.logModule.logger import get_logger
 from tg_forwarder.uploader.utils import TelegramClientManager, MediaUtils
-from tg_forwarder.channel_parser import ChannelValidator
+from tg_forwarder.channel_utils import ChannelUtils, get_channel_utils
 
 # 获取日志记录器
 logger = get_logger("message_sender")
@@ -35,7 +35,7 @@ class MessageSender:
         self.wait_time = wait_time
         self.retry_count = retry_count
         self.retry_delay = retry_delay
-        self.validator = ChannelValidator(client_manager.client)
+        self.channel_utils = ChannelUtils(client_manager.client)
     
     @property
     def client(self):
@@ -325,42 +325,9 @@ class MessageSender:
         if not self.client:
             return {"success": False, "error": "客户端未初始化"}
         
-        # 处理私密频道链接 - 直接使用ChannelValidator的方法获取实际聊天ID
-        target_chat_id = target_channel
-        if isinstance(target_channel, str) and (target_channel.startswith('+') or 't.me/+' in target_channel):
-            # 如果是纯邀请码格式，转换为完整链接
-            if target_channel.startswith('+') and '/' not in target_channel:
-                target_channel = f"https://t.me/{target_channel}"
-            
-            logger.info(f"处理私密频道链接: {target_channel}")
-            
-            # 尝试获取实际chat实体和ID
-            try:
-                chat_entity = await self.client_manager.client.get_chat(target_channel)
-                if chat_entity:
-                    target_chat_id = chat_entity.id
-                    logger.info(f"成功获取私密频道ID: {target_chat_id}")
-                else:
-                    return {"success": False, "error": f"无法获取私密频道实体: {target_channel}"}
-            except Exception as e:
-                logger.error(f"获取私密频道实体时出错: {str(e)}")
-                return {"success": False, "error": f"无法处理私密频道链接: {str(e)}"}
-        
-        # 同样处理源频道
-        source_chat_id = source_channel
-        if isinstance(source_channel, str) and (source_channel.startswith('+') or 't.me/+' in source_channel):
-            if source_channel.startswith('+') and '/' not in source_channel:
-                source_channel = f"https://t.me/{source_channel}"
-            
-            try:
-                chat_entity = await self.client_manager.client.get_chat(source_channel)
-                if chat_entity:
-                    source_chat_id = chat_entity.id
-                    logger.info(f"成功获取源私密频道ID: {source_chat_id}")
-                else:
-                    return {"success": False, "error": f"无法获取源私密频道实体: {source_channel}"}
-            except Exception as e:
-                return {"success": False, "error": f"无法处理源私密频道链接: {str(e)}"}
+        # 使用channel_utils获取实际聊天ID
+        target_chat_id = self.channel_utils.get_actual_chat_id(target_channel)
+        source_chat_id = self.channel_utils.get_actual_chat_id(source_channel)
         
         for attempt in range(self.retry_count + 1):
             try:
@@ -418,42 +385,9 @@ class MessageSender:
         if not self.client:
             return {"success": False, "error": "客户端未初始化"}
         
-        # 处理私密频道链接 - 直接使用ChannelValidator的方法获取实际聊天ID
-        target_chat_id = target_channel
-        if isinstance(target_channel, str) and (target_channel.startswith('+') or 't.me/+' in target_channel):
-            # 如果是纯邀请码格式，转换为完整链接
-            if target_channel.startswith('+') and '/' not in target_channel:
-                target_channel = f"https://t.me/{target_channel}"
-            
-            logger.info(f"处理私密频道链接: {target_channel}")
-            
-            # 尝试获取实际chat实体和ID
-            try:
-                chat_entity = await self.client_manager.client.get_chat(target_channel)
-                if chat_entity:
-                    target_chat_id = chat_entity.id
-                    logger.info(f"成功获取私密频道ID: {target_chat_id}")
-                else:
-                    return {"success": False, "error": f"无法获取私密频道实体: {target_channel}"}
-            except Exception as e:
-                logger.error(f"获取私密频道实体时出错: {str(e)}")
-                return {"success": False, "error": f"无法处理私密频道链接: {str(e)}"}
-        
-        # 同样处理源频道
-        source_chat_id = source_channel
-        if isinstance(source_channel, str) and (source_channel.startswith('+') or 't.me/+' in source_channel):
-            if source_channel.startswith('+') and '/' not in source_channel:
-                source_channel = f"https://t.me/{source_channel}"
-            
-            try:
-                chat_entity = await self.client_manager.client.get_chat(source_channel)
-                if chat_entity:
-                    source_chat_id = chat_entity.id
-                    logger.info(f"成功获取源私密频道ID: {source_chat_id}")
-                else:
-                    return {"success": False, "error": f"无法获取源私密频道实体: {source_channel}"}
-            except Exception as e:
-                return {"success": False, "error": f"无法处理源私密频道链接: {str(e)}"}
+        # 使用channel_utils获取实际聊天ID
+        target_chat_id = self.channel_utils.get_actual_chat_id(target_channel)
+        source_chat_id = self.channel_utils.get_actual_chat_id(source_channel)
         
         for attempt in range(self.retry_count + 1):
             try:

@@ -12,11 +12,10 @@ import time
 
 from tg_forwarder.config import Config
 from tg_forwarder.client import TelegramClient
-from tg_forwarder.channel_parser import ChannelParser, ChannelValidator
+from tg_forwarder.channel_utils import ChannelUtils, get_channel_utils, parse_channel
 from tg_forwarder.forwarder import MessageForwarder
 from tg_forwarder.logModule.logger import setup_logger, get_logger
 from tg_forwarder.client import Client
-from tg_forwarder.channel_state import ChannelStateManager
 
 # 添加新导入的模块
 from tg_forwarder.taskQueue import TaskQueue
@@ -42,9 +41,8 @@ class ForwardManager:
         self.config = Config(config_path)
         self.client = None
         self.forwarder = None
-        self.channel_validator = None
-        # 替换为频道状态管理器
-        self.channel_state_manager = ChannelStateManager()
+        # 使用ChannelUtils替代原来的channel_validator和channel_state_manager
+        self.channel_utils = None
     
     async def setup(self) -> None:
         """初始化组件"""
@@ -54,12 +52,11 @@ class ForwardManager:
                 api_config=self.config.get_api_config(),
                 proxy_config=self.config.get_proxy_config()
             )
-            
             # 连接到Telegram
             await self.client.connect()
             
-            # 创建频道验证器，传递状态管理器
-            self.channel_validator = ChannelValidator(self.client, self.channel_state_manager)
+            # 初始化ChannelUtils
+            self.channel_utils = ChannelUtils(self.client)
             
             # 创建消息转发器
             forward_config = self.config.get_forward_config()
@@ -69,7 +66,7 @@ class ForwardManager:
         except Exception as e:
             logger.error(f"初始化组件时出错: {str(e)}")
             raise
-    
+        
     async def shutdown(self) -> None:
         """关闭所有组件并释放资源"""
         if self.client:
@@ -77,89 +74,190 @@ class ForwardManager:
         
         logger.info("已关闭所有组件")
     
-    async def check_channel_forward_status(self, channels: List[Union[str, int]]) -> Dict[str, bool]:
+    async def validate_channels(self) -> Tuple[List[str], List[str]]:
         """
-        检查频道是否禁止转发，并缓存结果
+        验证频道列表
+        
+        Returns:
+            Tuple[List[str], List[str]]: (有效频道列表, 无效频道列表)
+        """
+        # 获取目标频道列表
+        target_channels = self.config.get_target_channels()
+        
+        # 使用channel_utils验证频道
+        result = await self.channel_utils.validate_channels(target_channels)
+        
+        # 从结果提取有效和无效频道
+        valid_channels = result["valid_channels"]
+        invalid_channels = result["invalid_channels"]
+        
+        return valid_channels, invalid_channels
+    
+    async def select_source_channel(self, valid_channels: List[str]) -> Optional[str]:
+        """
+        选择源频道
         
         Args:
-            channels: 频道ID或用户名列表
+            valid_channels: 有效频道列表
             
         Returns:
-            Dict[str, bool]: 频道转发状态字典，键为频道ID，值为是否允许转发(True表示允许)
+            Optional[str]: 选择的源频道，如果没有找到合适的源频道则返回None
         """
-        results = {}
+        if not valid_channels:
+            logger.error("没有有效的频道可选择")
+            return None
+            
+        # 使用channel_utils获取频道状态并排序
+        # 优先考虑允许转发的频道作为源
+        sorted_channels = self.channel_utils.sort_channels_by_status(valid_channels)
         
-        for channel_id in channels:
-            if self.channel_state_manager.is_cached(channel_id):
-                # 使用缓存结果
-                results[str(channel_id)] = self.channel_state_manager.get_forward_status(channel_id)
-                continue
-                
-            try:
-                # 获取频道完整信息
-                chat_info = await self.client.get_entity(channel_id)
-                
-                # 检查是否设置了禁止转发
-                if hasattr(chat_info, 'has_protected_content') and chat_info.has_protected_content:
-                    # 禁止转发
-                    allow_forward = False
-                    logger.info(f"频道 {channel_id} 状态预检: ⚠️ 禁止转发 (has_protected_content=True)")
-                else:
-                    # 允许转发
-                    allow_forward = True
-                    logger.info(f"频道 {channel_id} 状态预检: ✓ 允许转发 (has_protected_content=False)")
-                
-                # 保存状态到管理器
-                self.channel_state_manager.set_forward_status(channel_id, allow_forward)
-                results[str(channel_id)] = allow_forward
-                
-            except Exception as e:
-                logger.warning(f"获取频道 {channel_id} 的保护内容状态失败: {str(e)[:100]}")
-                # 默认为允许转发
-                results[str(channel_id)] = True
-                self.channel_state_manager.set_forward_status(channel_id, True)
+        for channel in sorted_channels:
+            # 检查频道是否允许转发
+            if self.channel_utils.get_forward_status(channel):
+                logger.info(f"已选择频道 {channel} 作为转发源")
+                return channel
         
-        return results
+        # 如果没有找到允许转发的频道，使用第一个频道作为源
+        # 但发出警告
+        logger.warning("没有找到允许转发的频道，将使用第一个频道作为源")
+        logger.warning("注意: 这可能无法正常工作，因为该频道禁止转发内容")
+        return valid_channels[0]
+    
+    async def update_channel_status(self, channel: str) -> bool:
+        """
+        更新频道状态信息
+        
+        Args:
+            channel: 频道标识符
+            
+        Returns:
+            bool: 是否允许转发
+        """
+        # 使用channel_utils获取或更新频道状态
+        if not self.channel_utils.is_cached(channel):
+            logger.info(f"更新频道 {channel} 的状态信息")
+            result = await self.channel_utils.validate_channel(channel)
+            return result["allow_forward"]
+        return self.channel_utils.get_forward_status(channel)
     
     async def parse_channels(self) -> Tuple[Optional[Union[str, int]], List[Union[str, int]], Dict[str, Any]]:
         """
-        解析源频道和目标频道
+        解析配置中的频道设置
         
         Returns:
-            Tuple[Optional[Union[str, int]], List[Union[str, int]], Dict[str, Any]]: 
-            返回(源频道标识符, 目标频道标识符列表, 错误信息字典)
+            Tuple[Optional[Union[str, int]], List[Union[str, int]], Dict[str, Any]]:
+                (源频道标识符, 目标频道标识符列表, 额外配置)
         """
+        logger.info("开始解析频道配置...")
+        
         # 获取频道配置
         channels_config = self.config.get_channels_config()
-        source_channel_str = channels_config['source_channel']
-        target_channels_str = channels_config['target_channels']
         
-        # 解析源频道
-        source_identifier = None
-        try:
-            source_identifier, _ = ChannelParser.parse_channel(source_channel_str)
-            logger.info(f"源频道: {ChannelParser.format_channel_identifier(source_identifier)}")
-        except Exception as e:
-            error_msg = f"解析源频道失败: {str(e)}"
-            logger.error(error_msg)
-            return None, [], {"success": False, "error": error_msg}
+        # 获取目标频道列表
+        target_channels = channels_config['target_channels']
+        if not target_channels:
+            logger.error("未设置目标频道")
+            return None, [], {}
+            
+        # 获取源频道设置
+        source_channel = channels_config['source_channel']
         
-        # 解析目标频道
-        target_identifiers = []
-        for target_str in target_channels_str:
-            try:
-                target_identifier, _ = ChannelParser.parse_channel(target_str)
-                target_identifiers.append(target_identifier)
-                logger.info(f"目标频道: {ChannelParser.format_channel_identifier(target_identifier)}")
-            except Exception as e:
-                logger.warning(f"解析目标频道 '{target_str}' 失败: {str(e)}")
+        # 先验证所有的目标频道
+        logger.info(f"验证目标频道: {', '.join(target_channels)}")
+        result = await self.channel_utils.validate_channels(target_channels)
         
-        if not target_identifiers:
-            error_msg = "没有有效的目标频道"
-            logger.error(error_msg)
-            return source_identifier, [], {"success": False, "error": error_msg}
+        valid_channels = result["valid_channels"]
+        invalid_channels = result["invalid_channels"]
         
-        return source_identifier, target_identifiers, {}
+        if not valid_channels:
+            logger.error("没有有效的目标频道，终止程序")
+            return None, [], {}
+            
+        # 如果源频道为空或设为auto，则自动选择第一个允许转发的频道作为源
+        auto_select = False
+        if not source_channel or source_channel.lower() == 'auto':
+            auto_select = True
+            logger.info("使用自动选择模式选择源频道")
+        
+        # 源频道和目标频道分开处理，确保正确的转发方向
+        if auto_select:
+            # 按照转发状态排序频道
+            source_identifier = await self.select_source_channel(valid_channels)
+            if not source_identifier:
+                logger.error("没有找到合适的源频道")
+                return None, [], {}
+                
+            # 从目标列表中移除源频道
+            if source_identifier in valid_channels:
+                valid_channels.remove(source_identifier)
+                
+            # 如果没有有效目标频道，终止程序
+            if not valid_channels:
+                logger.error("没有有效的目标频道（源频道已从目标列表中移除）")
+                return None, [], {}
+                
+            logger.info(f"自动选择 {source_identifier} 作为源频道")
+            logger.info(f"有效目标频道: {', '.join(map(str, valid_channels))}")
+            
+            # 解析源频道
+            source_identifier, _ = parse_channel(source_identifier)
+            target_identifiers = [parse_channel(ch)[0] for ch in valid_channels]
+            
+        else:
+            # 验证源频道
+            logger.info(f"验证源频道: {source_channel}")
+            source_result = await self.channel_utils.validate_channel(source_channel)
+            
+            if not source_result["valid"]:
+                error_msg = source_result["error"] or "未知错误"
+                logger.error(f"源频道 {source_channel} 无效: {error_msg}")
+                return None, [], {}
+            
+            logger.info(f"源频道 {source_channel} 有效")
+            
+            # 解析源频道
+            source_identifier, _ = parse_channel(source_channel)
+            
+            # 从目标列表中移除源频道
+            target_identifiers = []
+            for channel in valid_channels:
+                if channel != source_channel:
+                    channel_id, _ = parse_channel(channel)
+                    target_identifiers.append(channel_id)
+            
+            if not target_identifiers:
+                logger.error("没有有效的目标频道（源频道已从目标列表中移除）")
+                return None, [], {}
+                
+            logger.info(f"使用用户指定的源频道: {source_channel}")
+            logger.info(f"有效目标频道: {', '.join(map(str, valid_channels))}")
+        
+        # 检查源频道是否允许转发
+        source_allow_forward = self.channel_utils.get_forward_status(source_identifier)
+        
+        # 根据预检查结果排序目标频道，使用管理器的排序方法
+        logger.info("根据转发状态对目标频道进行排序...")
+        sorted_targets = self.channel_utils.sort_channels_by_status(target_identifiers)
+        
+        # 记录排序后的频道状态
+        logger.info(f"源频道 {source_identifier} 状态: {'允许转发' if source_allow_forward else '禁止转发'}")
+        for channel in sorted_targets:
+            status = "允许转发" if self.channel_utils.get_forward_status(channel) else "禁止转发"
+            logger.info(f"目标频道 {channel} 状态: {status}")
+        
+        # 返回额外配置
+        extra_configs = {
+            "batch_size": self.config.get_forward_config().get('batch_size', 10),
+            "delay_between_messages": self.config.get_forward_config().get('delay', 10),
+            "delay_between_batches": 60,  # 使用默认值
+            "captions": {},  # 使用空字典替代 get_captions() 方法的结果
+            "stop_on_error": False,  # 使用默认值
+            "copy_voice_note": True,  # 使用默认值
+            "auto_select_source": auto_select,
+            "source_allow_forward": source_allow_forward
+        }
+        
+        return source_identifier, sorted_targets, extra_configs
     
     async def prepare_channels(self, source_identifier: Union[str, int], target_identifiers: List[Union[str, int]]) -> Tuple[bool, List[Union[str, int]]]:
         """
@@ -178,16 +276,16 @@ class ForwardManager:
         channel_status = await self.check_channel_forward_status(all_channels)
         
         # 检查源频道是否允许转发
-        source_allow_forward = self.channel_state_manager.get_forward_status(source_identifier)
+        source_allow_forward = self.channel_utils.get_forward_status(source_identifier)
         
         # 根据预检查结果排序目标频道，使用管理器的排序方法
         logger.info("根据转发状态对目标频道进行排序...")
-        sorted_targets = self.channel_state_manager.sort_channels_by_status(target_identifiers)
+        sorted_targets = self.channel_utils.sort_channels_by_status(target_identifiers)
         
         # 记录排序后的频道状态
         logger.info(f"源频道 {source_identifier} 状态: {'允许转发' if source_allow_forward else '禁止转发'}")
         for channel in sorted_targets:
-            status = "允许转发" if self.channel_state_manager.get_forward_status(channel) else "禁止转发"
+            status = "允许转发" if self.channel_utils.get_forward_status(channel) else "禁止转发"
             logger.info(f"目标频道 {channel} 状态: {status}")
         
         return source_allow_forward, sorted_targets
@@ -219,6 +317,9 @@ class ForwardManager:
             await self.handle_forward_errors(result)
         else:
             logger.info("所有消息转发成功")
+        
+        # 添加成功标志
+        result["success_flag"] = True
         
         return result
     
@@ -269,9 +370,14 @@ class ForwardManager:
         """
         try:
             # 解析频道信息
-            source_identifier, target_identifiers, error = await self.parse_channels()
-            if error:
-                return error
+            source_identifier, target_identifiers, extra_configs = await self.parse_channels()
+            if not source_identifier:
+                error_result = {"success_flag": False, "error": "无法找到有效的源频道"}
+                return error_result
+            
+            if not target_identifiers:
+                error_result = {"success_flag": False, "error": "无法找到有效的目标频道"}
+                return error_result
             
             # 预检查频道状态并排序目标频道
             source_allow_forward, sorted_targets = await self.prepare_channels(source_identifier, target_identifiers)
@@ -604,7 +710,8 @@ class ForwardManager:
                     result.update({
                         "download_count": pipeline_control["download_count"],
                         "upload_count": pipeline_control["upload_count"],
-                        "error": None
+                        "error": None,
+                        "success_flag": True  # 添加成功标志
                     })
                     
                     logger.info(f"下载上传流水线任务完成，总计下载: {result.get('download_count')} 批次，"
@@ -616,6 +723,7 @@ class ForwardManager:
                     import traceback
                     logger.error(traceback.format_exc())
                     result["error"] = f"下载上传过程中发生错误: {str(e)}"
+                    result["success_flag"] = False  # 失败标志
                 
                 finally:
                     # 关闭媒体上传器临时客户端
@@ -628,8 +736,9 @@ class ForwardManager:
             result["duration"] = result.get("end_time", 0) - result.get("start_time", 0)
             logger.info(f"总耗时: {result.get('duration', 0):.2f}秒")
             
-            # 添加成功标志
-            result["success_flag"] = True
+            # 添加成功标志（如果尚未设置）
+            if "success_flag" not in result:
+                result["success_flag"] = True
             
             return result
         
@@ -658,4 +767,30 @@ class ForwardManager:
             return result
         
         finally:
-            await manager.shutdown() 
+            await manager.shutdown()
+
+    async def check_channel_forward_status(self, channels: List[Union[str, int]]) -> Dict[Union[str, int], bool]:
+        """
+        检查多个频道的转发状态
+        
+        Args:
+            channels: 频道标识符列表
+            
+        Returns:
+            Dict[Union[str, int], bool]: 频道ID到转发状态的映射
+        """
+        channel_status = {}
+        for channel in channels:
+            logger.info(f"检查频道 {channel} 的转发状态...")
+            if self.channel_utils.is_cached(channel):
+                status = self.channel_utils.get_forward_status(channel)
+                channel_status[channel] = status
+                logger.info(f"频道 {channel} 状态 (缓存): {'允许转发' if status else '禁止转发'}")
+            else:
+                # 验证频道并获取状态
+                result = await self.channel_utils.validate_channel(channel)
+                status = result.get("allow_forward", False)
+                channel_status[channel] = status
+                logger.info(f"频道 {channel} 状态 (新查询): {'允许转发' if status else '禁止转发'}")
+                
+        return channel_status 
