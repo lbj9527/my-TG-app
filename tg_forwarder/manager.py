@@ -12,8 +12,8 @@ import time
 
 from tg_forwarder.config import Config
 from tg_forwarder.client import TelegramClient
-from tg_forwarder.channel_utils import ChannelUtils, get_channel_utils, parse_channel
-from tg_forwarder.forwarder import MessageForwarder
+from tg_forwarder.utils.channel_utils import ChannelUtils, get_channel_utils, parse_channel
+from tg_forwarder.forward.forwarder import MessageForwarder
 from tg_forwarder.logModule.logger import setup_logger, get_logger
 from tg_forwarder.client import Client
 

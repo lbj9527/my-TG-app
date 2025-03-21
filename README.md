@@ -1,263 +1,67 @@
 ## 版本更新记录
 
-### v1.0.0 (2023-03-10)
+### v1.8.0 (2025-03-21)
 
-### 核心改进
+#### 核心改进
 
-在此版本中，我们对日志系统进行了全面优化，构建了一个更加模块化、功能丰富且易于使用的日志记录系统。这些改进显著提升了程序的可维护性和用户体验。
+在本次更新中，我们对转发管理器的代码结构进行了重要重构，显著提高了代码的可维护性和可读性。
 
-#### 新增组件
+##### 代码结构优化
 
-- **增强型日志记录器**：
+- **拆分 run 方法**：
 
-  - 支持多种日志级别（TRACE、DEBUG、INFO、SUCCESS、WARNING、ERROR、CRITICAL）
-  - 为不同模块提供独立的日志级别控制
-  - 集成进度条和过滤器功能
+  - 将长达 400 行的 run 方法分解为 7 个职责明确的子方法
+  - 每个子方法专注于单一功能，遵循单一职责原则
+  - 提高了代码的可读性、可测试性和可维护性
 
-- **进度条模块**：
+- **新增的子方法**：
+  - `_get_real_channel_ids`：获取源频道和目标频道的真实 ID
+  - `_setup_media_components`：设置媒体处理相关组件
+  - `_download_producer`：处理下载任务生产
+  - `_upload_producer`：处理上传任务生产
+  - `_upload_consumer`：处理上传任务消费
+  - `_process_download_upload`：处理完整的下载上传流程
+  - `_create_error_result`：创建标准错误结果
 
-  - 支持创建和管理多个进度条
-  - 显示完成百分比、处理速度和预估剩余时间
-  - 确保日志输出不会干扰进度条显示
+##### 错误处理优化
 
-- **日志过滤器**：
-  - FFmpeg 输出过滤器：自动过滤处理过程中的冗余输出
-  - 系统日志过滤器：过滤不必要的系统级日志
-  - Telegram API 过滤器：过滤 API 调试信息
+- **统一错误处理**：
+  - 使用`_create_error_result`方法统一生成错误结果格式
+  - 在所有可能发生错误的位置添加详细的错误日志
+  - 确保错误信息的一致性和可追踪性
 
-#### 架构优化
+##### 媒体上传器初始化修复
 
-1. **解耦合设计**：
+- **解决 MediaUploader 初始化问题**：
+  - 修复`_setup_media_components`方法，支持传入目标频道列表
+  - 解决了空目标频道列表导致初始化失败的问题
+  - 增加占位 ID 机制，确保在不提供真实 ID 时也能正常初始化
+  - 添加更多日志记录，便于调试上传过程
 
-   - 将进度条和日志过滤器分离成独立模块
-   - 各模块可单独使用或组合使用
+#### 代码质量改进
 
-2. **灵活配置**：
+- **增强方法文档**：
 
-   - 支持丰富的配置选项，适应不同场景需求
-   - 可自定义日志格式、输出目标和过滤规则
+  - 为所有新方法添加详细的 docstring
+  - 明确参数类型和返回值
+  - 提供方法功能描述
 
-3. **向后兼容**：
-   - 保留原有的接口，确保与现有代码无缝集成
-   - 支持渐进式迁移，新旧接口可混合使用
+- **日志增强**：
+  - 添加关键流程节点的日志记录
+  - 在关键操作前后添加状态日志
+  - 为重要参数添加值验证日志
 
-### 优化效果
+#### 重构效益
 
-1. **开发效率**：更清晰的日志输出，提高调试效率
-2. **用户体验**：通过进度条直观展示操作进度
-3. **代码质量**：模块化设计提高代码可维护性
-4. **资源利用**：过滤不必要的日志信息，减少输出量
+1. **可维护性**：单一职责的方法更易于维护和更新
+2. **可读性**：小型专注的方法更易于理解
+3. **可测试性**：独立方法便于单元测试
+4. **扩展性**：模块化结构为未来功能扩展奠定基础
+5. **稳定性**：更健壮的错误处理减少运行时崩溃
 
-这些改进为程序提供了更强大的日志和进度跟踪能力，同时保持了简洁的使用接口，大大提升了开发和使用体验。
+此版本的重构是持续改进和代码质量提升计划的一部分，通过逐步优化代码结构，我们致力于打造更易于维护、更可靠的应用程序。
 
-## 日志系统特性
-
-日志系统经过全面优化，具有以下主要特性：
-
-### 模块化设计
-
-- **进度条模块**：独立的 `progress.py` 支持创建和管理多个进度条
-- **日志过滤器**：`log_filter.py` 提供可自定义的日志过滤功能
-- **增强型日志记录器**：`logger.py` 集成了日志记录、进度条和过滤器功能
-
-### 增强的日志能力
-
-- 支持多种日志级别：TRACE、DEBUG、INFO、SUCCESS、WARNING、ERROR、CRITICAL
-- 支持为不同模块设置不同的日志级别
-- 通过过滤器实现对不需要的日志信息的过滤，保持控制台输出清晰
-
-### 进度条支持
-
-- 支持创建和管理多个进度条
-- 进度条显示完成百分比、处理速度和预估剩余时间
-- 日志输出不会干扰进度条显示
-
-### 预设过滤器
-
-- FFmpeg 输出过滤器：自动过滤 FFmpeg 处理过程中的冗余输出
-- 系统日志过滤器：过滤不必要的系统级日志
-- Telegram API 过滤器：过滤 Telegram API 调试信息
-
-### 向后兼容性
-
-- 保留原有的 `setup_logger` 和 `get_logger` 函数，确保与现有代码无缝集成
-- 新旧接口可以混合使用，方便渐进式迁移
-
-## 使用示例
-
-### 基本日志使用
-
-```python
-from tg_forwarder.utils.logger import get_logger, setup_logger
-
-# 初始化日志系统
-setup_logger({
-    'level': 'DEBUG',
-    'file': 'logs/app.log'
-})
-
-# 获取日志记录器
-logger = get_logger('my_module')
-
-# 记录不同级别的日志
-logger.debug("这是一条调试日志")
-logger.info("这是一条信息日志")
-logger.success("这是一条成功日志")
-logger.warning("这是一条警告日志")
-logger.error("这是一条错误日志")
-```
-
-### 使用进度条
-
-```python
-from tg_forwarder.utils.logger import get_logger
-
-logger = get_logger('downloader')
-
-# 创建进度条
-total_files = 100
-progress_bar = logger.create_progress_bar(
-    id="file_download",
-    total=total_files,
-    desc="下载文件"
-)
-
-# 在处理过程中更新进度条
-for i in range(total_files):
-    # 处理文件...
-
-    # 更新进度条
-    logger.update_progress("file_download", 1)
-
-    # 可以在进度条显示的同时输出日志
-    if i % 20 == 0:
-        logger.info(f"已下载 {i} 个文件")
-
-# 关闭进度条
-logger.close_progress_bar("file_download")
-logger.success("所有文件下载完成！")
-```
-
-### 启用 FFmpeg 输出过滤
-
-```python
-from tg_forwarder.utils.logger import get_logger
-
-logger = get_logger('media_processor')
-
-# 启用 FFmpeg 输出过滤
-logger.enable_ffmpeg_filter()
-
-# FFmpeg 相关的输出会被自动过滤
-# 例如："frame=  100 fps=50.0 q=29.0 size=128kB time=00:00:10.00"
-```
-
-### 多模块日志级别控制
-
-```python
-from tg_forwarder.utils.logger import LogManager
-
-# 全局配置
-LogManager.setup({
-    'level': 'INFO',
-    'file': 'logs/app.log'
-})
-
-# 为不同模块设置不同的日志级别
-downloader_logger = LogManager.get_logger('downloader')
-uploader_logger = LogManager.get_logger('uploader')
-
-# 全局启用 FFmpeg 过滤器
-LogManager.enable_ffmpeg_filter()
-```
-
-## 重构下载和上传模块的示例
-
-以下是将新日志系统集成到下载管理器的示例：
-
-```python
-from tg_forwarder.utils.logger import get_logger
-
-class DownloadManager:
-    """文件下载管理器"""
-
-    def __init__(self, config):
-        self.config = config
-        self.logger = get_logger('downloader')
-        # 启用 FFmpeg 输出过滤，避免大量进度输出
-        self.logger.enable_ffmpeg_filter()
-
-    async def download_media(self, media_list):
-        """下载媒体文件列表"""
-        total = len(media_list)
-        self.logger.info(f"开始下载 {total} 个媒体文件")
-
-        # 创建进度条
-        progress_bar = self.logger.create_progress_bar(
-            id="media_download",
-            total=total,
-            desc="下载媒体文件"
-        )
-
-        for i, media in enumerate(media_list):
-            try:
-                # 下载单个文件
-                await self.download_file(media)
-                self.logger.update_progress("media_download", 1)
-            except Exception as e:
-                self.logger.error(f"下载文件失败: {str(e)}")
-
-        self.logger.close_progress_bar("media_download")
-        self.logger.success(f"媒体下载完成，共 {total} 个文件")
-
-    async def download_file(self, media):
-        """下载单个文件"""
-        # 下载逻辑...
-        pass
-```
-
-## 日志系统配置选项
-
-LogConfig 支持以下配置项：
-
-| 参数           | 说明             | 默认值       |
-| -------------- | ---------------- | ------------ |
-| level          | 日志级别         | INFO         |
-| file           | 日志文件路径     | logs/app.log |
-| format         | 日志格式         | default      |
-| filters        | 过滤器列表       | []           |
-| show_progress  | 是否显示进度条   | True         |
-| console_output | 是否输出到控制台 | True         |
-| file_output    | 是否输出到文件   | True         |
-| rotation       | 日志文件轮换设置 | 1 day        |
-| retention      | 日志保留时间     | 7 days       |
-| compression    | 日志压缩方式     | zip          |
-| enqueue        | 是否使用队列写入 | True         |
-| colorize       | 是否使用彩色输出 | True         |
-
-## 升级说明
-
-该日志系统的升级主要集中在以下方面：
-
-1. **解耦合**：将进度条和日志过滤器分离成独立模块
-2. **易用性**：提供简洁的接口，使日志记录和进度展示更加方便
-3. **灵活性**：支持多种日志级别和过滤规则，适应不同场景
-4. **可扩展性**：采用模块化设计，便于未来功能扩展
-
-通过这些优化，日志系统不仅提供了更清晰的输出，还能有效地跟踪各种操作的进度，大大提升了程序的用户体验和可维护性。
-
-## 推荐的重构实践
-
-对于现有的下载和上传模块，建议采取以下重构方式：
-
-1. **中心化日志过滤**：在日志系统中集中处理 FFmpeg 和系统日志的过滤，保持模块代码的清洁
-2. **统一进度显示**：使用日志系统的进度条功能，替代自定义的进度显示代码
-3. **模块化日志**：为每个功能模块创建独立的日志记录器，方便单独控制和查看
-4. **异常处理标准化**：统一异常处理和日志记录格式，提高调试效率
-
-# 频道状态管理优化
-
-### v1.1.0 (2023-03-17)
+### v1.7.0 (2025-03-20)
 
 ### 核心改进
 
@@ -390,7 +194,6 @@ preserve_formatting = true
 ```
 tg_forwarder/
 ├── taskQueue.py            # 任务队列管理模块
-├── downloader/
 │   ├── __init__.py
 │   ├── message_fetcher.py  # 消息获取器
 │   ├── media_downloader.py # 媒体下载器
@@ -716,17 +519,4 @@ wait_between_messages = 1  # 消息间等待时间(秒)
 
    - 集中链接解析逻辑到`channel_utils.py`
    - 简化`forwarder.py`的职责，专注于消息转发功能
-   - 优化`manager.py`中的错误处理流程
-
-2. **异常处理**：
-
-   - 增强对特殊链接格式引起的异常处理
-   - 防止`NoneType`对象访问错误中断程序执行
-   - 确保程序能够优雅地处理解析和验证失败
-
-3. **用户体验**：
-   - 提供更详细的错误日志，帮助用户理解失败原因
-   - 确保程序在频道验证失败时给出明确提示
-   - 防止无效频道导致的不必要处理
-
-这些改进显著提升了程序处理各类频道链接的能力，特别是对包含消息 ID 的链接格式和私有频道的支持。同时，通过优化验证流程和错误处理，提高了程序的稳定性和用户体验。
+   - 优化`manager.py`

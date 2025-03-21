@@ -11,7 +11,7 @@ from pyrogram.errors import FloodWait, SlowmodeWait, ChannelPrivate, ChatForward
 
 from tg_forwarder.logModule.logger import get_logger
 from tg_forwarder.uploader.utils import TelegramClientManager, MediaUtils
-from tg_forwarder.channel_utils import ChannelUtils, get_channel_utils
+from tg_forwarder.utils.channel_utils import ChannelUtils, get_channel_utils
 
 # 获取日志记录器
 logger = get_logger("message_sender")

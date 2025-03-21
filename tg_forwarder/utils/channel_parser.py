@@ -7,7 +7,7 @@
 # =====================================
 """
 # 示例1: 解析不同格式的频道链接
-from tg_forwarder.channel_parser import ChannelParser
+from tg_forwarder.utils.channel_parser import ChannelParser
 
 # 1.1 解析公开频道用户名
 channel_id, message_id = ChannelParser.parse_channel("@telegram")
@@ -42,7 +42,7 @@ channel_id, message_id = ChannelParser.parse_channel("+abcdefghijk")
 # 返回: ('https://t.me/+abcdefghijk', None)
 
 # 示例2: 格式化频道标识符为友好显示格式
-from tg_forwarder.channel_parser import ChannelParser
+from tg_forwarder.utils.channel_parser import ChannelParser
 
 # 2.1 格式化公开频道用户名
 friendly_name = ChannelParser.format_channel_identifier("telegram")
@@ -57,7 +57,7 @@ friendly_name = ChannelParser.format_channel_identifier("https://t.me/+abcdefghi
 # 返回: '私有频道(邀请链接)'
 
 # 示例3: 过滤频道列表，移除无效的频道标识符
-from tg_forwarder.channel_parser import ChannelParser
+from tg_forwarder.utils.channel_parser import ChannelParser
 
 channels = ["@telegram", "", "invalid#channel", "1234567890", "+abcdefgh"]
 filtered = ChannelParser.filter_channels(channels)
@@ -66,33 +66,33 @@ filtered = ChannelParser.filter_channels(channels)
 # 示例4: 验证频道是否存在并检查转发权限 (需要客户端实例)
 import asyncio
 from tg_forwarder.client import TelegramClient
-from tg_forwarder.channel_parser import ChannelValidator
+from tg_forwarder.utils.channel_utils import ChannelUtils
 
 async def validate_example():
     # 初始化客户端
     client = TelegramClient(api_config={...}, proxy_config={...})
     await client.connect()
     
-    # 创建验证器
-    validator = ChannelValidator(client)
+    # 创建工具类
+    channel_utils = ChannelUtils(client)
     
     # 4.1 验证单个频道
-    is_valid, error_msg, chat = await validator.validate_channel("@telegram")
-    if is_valid:
-        print(f"频道有效: {chat.title}")
-        print(f"是否允许转发: {not chat.has_protected_content}")
+    result = await channel_utils.validate_channel("@telegram")
+    if result["valid"]:
+        print(f"频道有效: {result['title']}")
+        print(f"是否允许转发: {result['allow_forward']}")
     else:
-        print(f"频道无效: {error_msg}")
+        print(f"频道无效: {result['error']}")
     
     # 4.2 批量验证多个频道
     channels = ["@telegram", "@durov", "invalid_channel"]
-    valid_channels, invalid_channels, forward_status = await validator.validate_channels(channels)
-    print(f"有效频道: {valid_channels}")
-    print(f"无效频道: {invalid_channels}")
+    result = await channel_utils.validate_channels(channels)
+    print(f"有效频道: {result['valid_channels']}")
+    print(f"无效频道: {result['invalid_channels']}")
     
     # 4.3 获取频道的转发状态
-    can_forward = validator.get_forward_status("@telegram")
-    print(f"频道是否允许转发: {can_forward}")
+    allow_forward = channel_utils.get_forward_status("@telegram")
+    print(f"频道是否允许转发: {allow_forward}")
     
     await client.disconnect()
 
@@ -106,7 +106,9 @@ from urllib.parse import urlparse
 import logging
 
 # 获取日志记录器
-logger = logging.getLogger("channel_parser")
+from tg_forwarder.logModule.logger import get_logger
+
+logger = get_logger("channel_parser")
 
 class ChannelParseError(Exception):
     """频道解析错误异常"""

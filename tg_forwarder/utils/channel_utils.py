@@ -11,7 +11,7 @@ from urllib.parse import urlparse
 from pyrogram import Client
 from pyrogram.types import Chat
 
-from tg_forwarder.channel_parser import ChannelParser, ChannelParseError
+from tg_forwarder.utils.channel_parser import ChannelParser, ChannelParseError
 from tg_forwarder.logModule.logger import get_logger
 
 logger = get_logger("channel_utils")
