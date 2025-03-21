@@ -376,6 +376,54 @@ class ChannelUtils:
             
         except Exception as e:
             return f"无法获取频道信息: {str(e)}"
+            
+    async def get_real_chat_id(self, channel_identifier: Union[str, int]) -> Tuple[Union[int, None], Optional[str]]:
+        """
+        获取频道的真实chat ID
+        
+        Args:
+            channel_identifier: 频道标识符，可以是用户名、链接或ID
+            
+        Returns:
+            Tuple[Union[int, None], Optional[str]]: (真实频道ID, 错误信息)
+        """
+        if not self.client:
+            return None, "未提供Telegram客户端实例"
+            
+        try:
+            # 先检查是否已经是数字ID
+            if isinstance(channel_identifier, int) or (isinstance(channel_identifier, str) and channel_identifier.isdigit()):
+                real_id = int(channel_identifier)
+                logger.info(f"频道已经是数字ID: {real_id}")
+                return real_id, None
+                
+            # 处理特殊链接格式
+            if isinstance(channel_identifier, str) and ('/' in channel_identifier or '+' in channel_identifier):
+                logger.info(f"处理特殊格式的频道链接: {channel_identifier}")
+                # 获取实际的频道标识符
+                actual_channel = self.get_actual_chat_id(channel_identifier)
+                logger.debug(f"解析后的实际频道标识符: {actual_channel}")
+            else:
+                actual_channel = channel_identifier
+            
+            # 尝试获取实体
+            entity = await self.client.get_entity(actual_channel)
+            if not entity:
+                error_msg = f"频道不存在或无法访问: {channel_identifier}"
+                logger.error(error_msg)
+                return None, error_msg
+            
+            # 获取真实的频道ID
+            real_id = entity.id
+            title = getattr(entity, 'title', '未知')
+            logger.info(f"已获取频道真实ID: {channel_identifier} -> {real_id} (标题: {title})")
+            return real_id, None
+            
+        except Exception as e:
+            error_msg = f"获取频道实体时出错: {str(e)}"
+            logger.error(error_msg)
+            logger.debug(f"出错的频道标识符: {channel_identifier}, 类型: {type(channel_identifier)}")
+            return None, error_msg
 
 # 创建便捷函数
 def parse_channel(channel_identifier: str) -> Tuple[Union[str, int], Optional[int]]:

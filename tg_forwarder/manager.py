@@ -411,68 +411,18 @@ class ForwardManager:
             real_target_ids = []
             
             try:
-                # 检查源频道是否存在并获取真实ID
-                try:
-                    # 先检查是否已经是数字ID
-                    if isinstance(source_identifier, int) or (isinstance(source_identifier, str) and source_identifier.isdigit()):
-                        real_source_id = int(source_identifier)
-                        logger.info(f"源频道已经是数字ID: {real_source_id}")
-                    else:
-                        # 处理特殊链接格式
-                        if isinstance(source_identifier, str) and ('/' in source_identifier or '+' in source_identifier):
-                            logger.info(f"处理特殊格式的源频道链接: {source_identifier}")
-                            # 如果是链接格式且包含消息ID，先尝试获取频道信息
-                            actual_channel = self.channel_utils.get_actual_chat_id(source_identifier)
-                            logger.debug(f"解析后的实际频道标识符: {actual_channel}")
-                        else:
-                            actual_channel = source_identifier
-                        
-                        # 尝试获取实体
-                        source_entity = await self.client.get_entity(actual_channel)
-                        if not source_entity:
-                            error_result = {"success_flag": False, "error": f"源频道不存在或无法访问: {source_identifier}"}
-                            logger.error(f"源频道不存在或无法访问: {source_identifier}")
-                            return error_result
-                        
-                        # 获取真实的源频道ID
-                        real_source_id = source_entity.id
-                        logger.info(f"已获取源频道真实ID: {source_identifier} -> {real_source_id} (标题: {getattr(source_entity, 'title', '未知')})")
-                except Exception as e:
-                    error_result = {"success_flag": False, "error": f"获取源频道实体时出错: {str(e)}"}
-                    logger.error(f"获取源频道实体时出错: {str(e)}")
-                    logger.debug(f"出错的源频道标识符: {source_identifier}, 类型: {type(source_identifier)}")
-                    return error_result
+                # 获取源频道真实ID
+                real_source_id, error = await self.channel_utils.get_real_chat_id(source_identifier)
+                if error:
+                    return {"success_flag": False, "error": error}
                 
-                # 检查目标频道是否存在并获取真实ID
+                # 获取目标频道真实ID列表
                 for target in sorted_targets:
-                    try:
-                        # 先检查是否已经是数字ID
-                        if isinstance(target, int) or (isinstance(target, str) and target.isdigit()):
-                            real_target_id = int(target)
-                            real_target_ids.append(real_target_id)
-                            logger.info(f"目标频道已经是数字ID: {real_target_id}")
-                            continue
-                            
-                        # 处理特殊链接格式
-                        if isinstance(target, str) and ('/' in target or '+' in target):
-                            logger.info(f"处理特殊格式的目标频道链接: {target}")
-                            # 如果是链接格式且包含消息ID，先尝试获取频道信息
-                            actual_target = self.channel_utils.get_actual_chat_id(target)
-                            logger.debug(f"解析后的实际目标频道标识符: {actual_target}")
-                        else:
-                            actual_target = target
-                        
-                        # 尝试获取实体
-                        target_entity = await self.client.get_entity(actual_target)
-                        if target_entity:
-                            # 保存真实的chat ID而不是原始标识符
-                            real_target_ids.append(target_entity.id)
-                            logger.info(f"已获取目标频道真实ID: {target} -> {target_entity.id} (标题: {getattr(target_entity, 'title', target)})")
-                        else:
-                            logger.warning(f"目标频道不存在或无法访问: {target}")
-                    except Exception as e:
-                        logger.warning(f"获取目标频道 {target} 真实ID时出错: {str(e)[:100]}")
-                        logger.debug(f"出错的目标频道标识符: {target}, 类型: {type(target)}")
+                    real_target_id, error = await self.channel_utils.get_real_chat_id(target)
+                    if real_target_id:
+                        real_target_ids.append(real_target_id)
+                    else:
+                        logger.warning(f"无法获取目标频道 {target} 的真实ID: {error}")
                 
                 if not real_target_ids:
                     error_result = {"success_flag": False, "error": "没有有效的目标频道"}
