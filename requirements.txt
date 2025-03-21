@@ -1,15 +1,47 @@
-pyrogram==2.0.106
-tgcrypto==1.2.5
-aiohttp==3.8.5
-aiofiles==23.1.0
-pysocks==1.7.1
-cryptography==41.0.3
-python-dotenv==1.0.0
-loguru==0.7.0
-urllib3==2.0.4
-typing-extensions==4.7.1
-pillow==10.0.0
-requests==2.31.0
+# TG Forwarder - 依赖包
+
+# Telegram客户端库
+pyrogram>=2.0.0
+TgCrypto>=1.2.0
+
+# 网络和异步支持
+aiohttp>=3.8.0
+asyncio>=3.4.3
+
+# 数据验证和配置
+pydantic>=1.9.0,<2.0.0
+
+# 日志记录
+loguru>=0.6.0
+
+# 配置管理
+python-dotenv>=0.20.0
+
+# 存储和数据库
+aiosqlite>=0.17.0
+
+# 测试
+pytest>=7.0.0
+pytest-asyncio>=0.18.0
+
+# 类型检查
+mypy>=0.910
+
+# 工具和实用程序
+aiofiles>=0.8.0
+pillow>=9.0.0  # 用于图像处理
+python-dateutil>=2.8.0
+humanize>=4.0.0
+pysocks>=1.7.1
+cryptography>=41.0.0
+urllib3>=2.0.0
+typing-extensions>=4.7.0
+requests>=2.31.0
+
+# CLI相关
+colorama>=0.4.4
+tqdm>=4.62.0
+
 # 自定义媒体组上传所需
 tqdm==4.66.1
 colorama==0.4.6

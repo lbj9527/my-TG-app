@@ -1,3 +1,250 @@
+# TG Forwarder
+
+TG Forwarder 是一个功能强大的 Telegram 消息转发工具，用于在不同的 Telegram 频道、群组或聊天之间转发消息。
+
+## 功能特点
+
+- **灵活的消息转发**：支持单条消息、媒体组和日期范围的批量转发
+- **多种转发模式**：支持原生转发或下载后再转发
+- **媒体处理**：可下载媒体文件并重新上传，避免转发限制
+- **字幕管理**：自定义转发消息的字幕格式或移除原始字幕
+- **频道关联**：灵活配置源频道与目标频道的对应关系
+- **任务调度**：支持计划任务和定时转发
+- **状态追踪**：详细记录消息转发状态，支持失败重试
+- **数据备份**：支持配置、数据库和媒体文件的备份和恢复
+- **命令行界面**：提供丰富的命令行操作方式
+
+## 系统要求
+
+- Python 3.7 或更高版本
+- 安装了 pip 包管理器
+
+## 安装步骤
+
+1. 克隆或下载本仓库：
+
+   ```bash
+   git clone https://your-repository-url/tg-forwarder.git
+   cd tg-forwarder
+   ```
+
+2. 创建并激活虚拟环境（推荐）：
+
+   ```bash
+   # Windows
+   python -m venv venv
+   venv\Scripts\activate
+
+   # Linux/macOS
+   python3 -m venv venv
+   source venv/bin/activate
+   ```
+
+3. 安装所需依赖：
+
+   ```bash
+   pip install -r requirements.txt
+   ```
+
+4. 创建必要的目录：
+   ```bash
+   mkdir -p logs data downloads backups config
+   ```
+
+## 配置
+
+TG Forwarder 使用 JSON 格式的配置文件。示例配置文件位于 `config/config.json`。
+
+### 必要配置
+
+1. **Telegram API 凭据**：
+   从 [my.telegram.org/apps](https://my.telegram.org/apps) 获取 API ID 和 API Hash，填入配置文件的 `telegram` 部分：
+
+   ```json
+   "telegram": {
+     "api_id": 你的API_ID,
+     "api_hash": "你的API_HASH",
+     "session_name": "tg_forwarder"
+   }
+   ```
+
+2. **源频道和目标频道**：
+   配置要监控的源频道和转发目标频道：
+   ```json
+   "source_channels": {
+     "channel1": -1001234567890,
+     "channel2": "@channel_username"
+   },
+   "target_channels": {
+     "target1": -1001098765432,
+     "target2": "@target_channel"
+   }
+   ```
+
+### 可选配置
+
+- **代理设置**：如需使用代理连接 Telegram，配置 `telegram.proxy` 部分
+- **转发设置**：在 `forward` 部分配置转发行为，如字幕模板、媒体处理等
+- **下载设置**：在 `download` 部分配置媒体下载行为
+- **备份设置**：在 `backup` 部分配置数据备份行为
+
+完整配置选项请参考示例配置文件 `config_ex.ini` 中的注释说明。
+
+## 使用方法
+
+### 初次使用
+
+首次运行会要求登录 Telegram 账号：
+
+```bash
+python run.py start
+```
+
+按照提示输入手机号和验证码完成登录。登录状态会保存在会话文件中，下次运行不需要重复登录。
+
+### 命令行操作
+
+TG Forwarder 支持多种命令行操作：
+
+#### 启动应用
+
+```bash
+# 启动应用并自动开始转发服务
+python run.py start
+
+# 启动应用但不自动开始转发
+python run.py start --no-forward
+```
+
+#### 控制转发状态
+
+```bash
+# 查看转发状态
+python run.py forward status
+
+# 启动转发服务
+python run.py forward start
+
+# 停止转发服务
+python run.py forward stop
+```
+
+#### 转发单条消息
+
+```bash
+python run.py send --source @channel_name --target @target_channel --message-id 12345
+```
+
+添加 `--download-media` 参数可以启用下载媒体后再转发：
+
+```bash
+python run.py send --source @channel_name --target @target_channel --message-id 12345 --download-media
+```
+
+#### 数据备份与恢复
+
+```bash
+# 备份数据
+python run.py backup --path ./my_backup
+
+# 恢复数据
+python run.py restore --path ./my_backup
+```
+
+#### 健康检查和版本信息
+
+```bash
+# 执行健康检查
+python run.py healthcheck
+
+# 显示版本信息
+python run.py version
+```
+
+### 日志查看
+
+日志文件默认保存在 `logs/tg_forwarder.log`，可通过查看此文件了解应用运行状态和错误信息。
+
+## 高级功能
+
+### 自定义字幕模板
+
+在配置中的 `forward.caption_template` 可以使用以下变量：
+
+- `{source_chat_title}` - 源频道标题
+- `{message_id}` - 原始消息 ID
+- `{date}` - 消息日期
+- `{time}` - 消息时间
+- `{original_caption}` - 原始字幕内容
+
+例如：
+
+```json
+"caption_template": "转自 {source_chat_title}\n原始消息: {message_id}\n日期: {date}"
+```
+
+### 频道特定配置
+
+可以为特定频道设置不同的转发行为，覆盖全局设置：
+
+```json
+"channel_config": {
+  "channel1": {
+    "caption_template": "From: {source_chat_title}\nID: {message_id}",
+    "remove_captions": true,
+    "download_media": false
+  }
+}
+```
+
+### 频道对应关系
+
+可以设置特定的源频道和目标频道的对应关系：
+
+```json
+"channel_pairs": {
+  "-1001234567890": "-1001098765432",
+  "@channel_username": "@target_channel"
+}
+```
+
+## 故障排除
+
+### 常见问题
+
+1. **无法连接到 Telegram**
+
+   - 检查网络连接
+   - 检查 API 凭据是否正确
+   - 如果在受限区域，尝试配置代理
+
+2. **转发失败**
+
+   - 检查是否有足够的权限
+   - 检查是否达到 Telegram API 限制
+   - 查看日志文件获取详细错误信息
+
+3. **应用崩溃**
+   - 检查日志文件了解错误原因
+   - 确保配置文件格式正确
+   - 尝试以调试模式运行: `python run.py -l DEBUG start`
+
+### 联系支持
+
+如有问题或建议，请提交 Issue 或联系项目维护者。
+
+## 许可证
+
+本项目采用 MIT 许可证。
+
+## 贡献
+
+欢迎贡献代码、报告问题或提出改进建议。请遵循项目的代码风格和贡献指南。
+
+## 免责声明
+
+本工具仅用于合法用途。用户应遵守 Telegram 服务条款和相关法律法规，不得用于未经授权的内容转发或其他违法行为。
+
 ## 版本更新记录
 
 ### v1.9.0 (2025-03-25)
