@@ -283,6 +283,100 @@ class ConfigManager(ConfigInterface):
             return [channel.strip() for channel in target_channels.split(',')]
         return target_channels
     
+    def get_forward_config(self) -> Dict[str, Any]:
+        """
+        获取转发配置
+        
+        Returns:
+            Dict[str, Any]: 转发配置字典，包含start_message_id、end_message_id等参数
+        """
+        forward_config = self.get('forward', {})
+        if not forward_config:
+            # 提供默认配置
+            return {
+                'start_message_id': 1,
+                'end_message_id': None,
+                'limit_messages': 1000,
+                'caption_template': '{original_caption}',
+                'remove_captions': False,
+                'hide_author': True,
+                'delay': 1.5,
+                'batch_size': 30,
+                'skip_emoji_messages': False,
+                'default_mode': 'copy',
+                'download_media': True
+            }
+        return forward_config
+    
+    def get_channel_pairs(self) -> Dict[str, List[Union[str, int]]]:
+        """
+        获取频道配对信息（源频道到目标频道的映射）
+        
+        Returns:
+            Dict[str, List[Union[str, int]]]: 源频道到目标频道的映射字典
+        """
+        pairs = self.get('channel_pairs', {})
+        result = {}
+        
+        # 处理配置文件中的频道对，确保每个源频道映射到一个目标频道列表
+        for source_channel, target_channels in pairs.items():
+            # 忽略无效的源频道
+            if not source_channel:
+                continue
+                
+            # 确保目标频道是一个列表
+            if isinstance(target_channels, (str, int)):
+                result[source_channel] = [target_channels]
+            elif isinstance(target_channels, list):
+                result[source_channel] = target_channels
+            else:
+                # 忽略无效的目标频道配置
+                continue
+                
+        return result
+    
+    def get_source_channel_config(self, channel_id: str) -> Dict[str, Any]:
+        """
+        获取特定源频道的配置
+        
+        Args:
+            channel_id: 源频道ID或URL
+            
+        Returns:
+            Dict[str, Any]: 源频道配置字典
+        """
+        # 标准化频道ID（移除前缀，如https://t.me/）
+        normalized_id = channel_id
+        if isinstance(channel_id, str):
+            if 't.me/' in channel_id.lower():
+                parts = channel_id.split('t.me/')
+                if len(parts) > 1:
+                    normalized_id = parts[1].split('/')[0]
+        
+        # 尝试获取特定频道的配置
+        source_configs = self.get('source_channel_config', {})
+        
+        # 直接尝试获取精确匹配的配置
+        exact_config = source_configs.get(normalized_id, None)
+        if exact_config:
+            return exact_config
+            
+        # 尝试查找匹配的域名/用户名部分
+        if isinstance(normalized_id, str):
+            for config_id, config in source_configs.items():
+                if isinstance(config_id, str) and normalized_id in config_id:
+                    return config
+        
+        # 返回默认配置
+        return {
+            'caption_template': self.get('forward.caption_template', '{original_caption}'),
+            'remove_captions': self.get('forward.remove_captions', False),
+            'media_types': self.get('forward.media_types', ['photo', 'video', 'document', 'audio', 'voice', 'sticker', 'animation']),
+            'start_id': self.get('forward.start_message_id', 1),
+            'end_id': self.get('forward.end_message_id', None),
+            'limit_messages': self.get('forward.limit_messages', 1000)
+        }
+    
     def validate(self) -> Dict[str, List[str]]:
         """
         验证配置有效性
@@ -300,15 +394,52 @@ class ConfigManager(ConfigInterface):
         if not telegram_section or not telegram_section.get('api_hash'):
             errors.setdefault('telegram.api_hash', []).append("API Hash不能为空")
         
-        # 验证频道部分
-        channels_section = self.config.get('channels', {})
-        source_channels = channels_section.get('source_channels', [])
-        if not source_channels:
-            errors.setdefault('channels.source_channels', []).append("源频道列表不能为空")
+        # 验证新的频道配对配置
+        channel_pairs = self.get('channel_pairs', {})
+        if not channel_pairs:
+            errors.setdefault('channel_pairs', []).append("频道配对不能为空，至少需要一对源频道到目标频道的映射")
         
-        target_channels = channels_section.get('target_channels', [])
-        if not target_channels:
-            errors.setdefault('channels.target_channels', []).append("目标频道列表不能为空")
+        # 检查每个配对的有效性
+        valid_pairs = False
+        for source, targets in channel_pairs.items():
+            if not source:
+                continue
+                
+            if not targets:
+                errors.setdefault(f'channel_pairs.{source}', []).append("目标频道列表不能为空")
+                continue
+                
+            # 发现至少一个有效的配对
+            valid_pairs = True
+            
+        if not valid_pairs:
+            errors.setdefault('channel_pairs', []).append("没有找到有效的频道配对")
+            
+        # 验证源频道配置部分
+        source_channel_config = self.get('source_channel_config', {})
+        for source_id, config in source_channel_config.items():
+            # 检查必要的配置项
+            if not isinstance(config, dict):
+                errors.setdefault(f'source_channel_config.{source_id}', []).append("配置必须是一个字典")
+                continue
+                
+            # 检查start_id和limit_messages的有效性（如果存在）
+            if 'start_id' in config and (not isinstance(config['start_id'], int) or config['start_id'] < 0):
+                errors.setdefault(f'source_channel_config.{source_id}.start_id', []).append("起始消息ID必须是一个非负整数")
+                
+            if 'limit_messages' in config and (not isinstance(config['limit_messages'], int) or config['limit_messages'] <= 0):
+                errors.setdefault(f'source_channel_config.{source_id}.limit_messages', []).append("消息限制必须是一个正整数")
+        
+        # 向后兼容：如果仍在使用旧的channels配置，也验证它们
+        if 'channels' in self.config:
+            channels_section = self.config.get('channels', {})
+            source_channels = channels_section.get('source_channels', [])
+            if not source_channels:
+                errors.setdefault('channels.source_channels', []).append("使用旧配置格式时，源频道列表不能为空")
+            
+            target_channels = channels_section.get('target_channels', [])
+            if not target_channels:
+                errors.setdefault('channels.target_channels', []).append("使用旧配置格式时，目标频道列表不能为空")
         
         return errors
     
