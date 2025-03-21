@@ -11,6 +11,7 @@ from typing import Dict, Any, List, Optional, Union, TypeVar
 from pathlib import Path
 from datetime import datetime, timedelta
 import threading
+import re
 
 from tg_forwarder.interfaces.storage_interface import StorageInterface
 
@@ -35,9 +36,9 @@ class Storage(StorageInterface):
         self.lock = threading.RLock()  # 可重入锁，用于线程安全
         self._initialized = False
     
-    def initialize(self) -> bool:
+    async def initialize(self) -> bool:
         """
-        初始化存储
+        初始化存储（异步方法）
         
         Returns:
             bool: 初始化是否成功
@@ -50,7 +51,6 @@ class Storage(StorageInterface):
             
             # 连接到数据库
             self.conn = sqlite3.connect(self.db_path, check_same_thread=False)
-            # 使用行工厂，结果集将作为字典返回
             self.conn.row_factory = sqlite3.Row
             
             # 创建必要的表
@@ -60,7 +60,6 @@ class Storage(StorageInterface):
             return True
         except Exception as e:
             print(f"初始化存储失败: {str(e)}")
-            self._initialized = False
             return False
     
     def close(self) -> None:
@@ -232,7 +231,7 @@ class Storage(StorageInterface):
                 self.conn.rollback()
                 return False
     
-    def query(self, collection: str, filter_dict: Dict[str, Any] = None, 
+    async def query(self, collection: str, filter_dict: Dict[str, Any] = None, 
              sort_by: Optional[str] = None, limit: Optional[int] = None, 
              skip: Optional[int] = None) -> List[Dict[str, Any]]:
         """
@@ -355,14 +354,89 @@ class Storage(StorageInterface):
                 print(f"计数失败: {str(e)}")
                 return 0
     
-    def ensure_index(self, collection: str, fields: List[str], unique: bool = False) -> bool:
+    def query_data(self, collection: str, filter_json: Dict[str, Any] = None, 
+                 sort_by: Optional[str] = None, limit: Optional[int] = None, 
+                 skip: Optional[int] = None) -> List[Dict[str, Any]]:
         """
-        确保索引存在
+        根据JSON数据字段查询集合中的数据
         
         Args:
             collection: 集合名称
-            fields: 索引字段
-            unique: 是否唯一索引
+            filter_json: JSON字段过滤条件
+            sort_by: 排序字段
+            limit: 限制返回数量
+            skip: 跳过数量
+            
+        Returns:
+            List[Dict[str, Any]]: 查询结果
+        """
+        if not self._initialized:
+            return []
+        
+        with self.lock:
+            try:
+                # 检查集合是否存在
+                if not self._collection_exists(collection):
+                    return []
+                
+                # 获取所有数据
+                cursor = self.conn.cursor()
+                cursor.execute(f"SELECT key, data, created_at, updated_at FROM {collection}")
+                rows = cursor.fetchall()
+                
+                result = []
+                for row in rows:
+                    data = json.loads(row['data'])
+                    
+                    # 应用JSON过滤器
+                    if filter_json:
+                        match = True
+                        for key, value in filter_json.items():
+                            if key not in data or data[key] != value:
+                                match = False
+                                break
+                        
+                        if not match:
+                            continue
+                    
+                    # 合并key和数据
+                    item = {
+                        'key': row['key'],
+                        'created_at': row['created_at'],
+                        'updated_at': row['updated_at'],
+                        **data
+                    }
+                    result.append(item)
+                
+                # 排序
+                if sort_by:
+                    reverse = False
+                    if sort_by.startswith('-'):
+                        sort_by = sort_by[1:]
+                        reverse = True
+                    
+                    result.sort(key=lambda x: x.get(sort_by, ''), reverse=reverse)
+                
+                # 分页
+                if skip and skip > 0:
+                    result = result[skip:]
+                
+                if limit and limit > 0:
+                    result = result[:limit]
+                
+                return result
+            except Exception as e:
+                print(f"查询数据失败: {str(e)}")
+                return []
+    
+    async def ensure_index(self, collection: str, fields: List[str], unique: bool = False) -> bool:
+        """
+        确保集合中存在指定的索引
+        
+        Args:
+            collection: 集合名称
+            fields: 索引字段列表
+            unique: 是否为唯一索引
             
         Returns:
             bool: 操作是否成功
@@ -370,31 +444,48 @@ class Storage(StorageInterface):
         if not self._initialized:
             return False
         
-        with self.lock:
-            try:
-                # 确保集合表存在
+        try:
+            with self.lock:
+                # 确保集合存在
                 self._ensure_collection(collection)
                 
-                # 验证字段
-                valid_fields = [f for f in fields if f in ['key', 'created_at', 'updated_at']]
-                if not valid_fields:
-                    return False
+                # 验证字段是否存在于表结构中
+                # SQLite表中的实际列只有: key, data, created_at, updated_at
+                valid_fields = []
+                json_fields = []
                 
-                # 生成索引名称
+                for field in fields:
+                    if field in ['key', 'data', 'created_at', 'updated_at']:
+                        valid_fields.append(field)
+                    else:
+                        # 这些字段可能存储在JSON data中，记录但不用于索引
+                        json_fields.append(field)
+                        print(f"注意: 字段 '{field}' 不是表 '{collection}' 中的列，可能存储在JSON数据中")
+                
+                # 如果没有有效字段，则使用创建时间作为索引
+                if not valid_fields:
+                    valid_fields = ['created_at']
+                
+                # 创建索引名称
                 index_name = f"idx_{collection}_{'_'.join(valid_fields)}"
                 unique_str = "UNIQUE " if unique else ""
                 
-                # 创建索引
+                # 构建索引SQL
+                sql = f"""
+                CREATE {unique_str}INDEX IF NOT EXISTS {index_name}
+                ON {collection} ({', '.join(valid_fields)})
+                """
+                
+                # 执行SQL
                 cursor = self.conn.cursor()
-                cursor.execute(
-                    f"CREATE {unique_str}INDEX IF NOT EXISTS {index_name} ON {collection} ({', '.join(valid_fields)})"
-                )
+                cursor.execute(sql)
                 self.conn.commit()
+                
                 return True
-            except Exception as e:
-                print(f"创建索引失败: {str(e)}")
-                self.conn.rollback()
-                return False
+        except Exception as e:
+            error_msg = f"创建索引失败: {str(e)}"
+            print(error_msg)  # 打印到控制台
+            return False
     
     def backup(self, backup_path: str) -> bool:
         """
@@ -470,6 +561,19 @@ class Storage(StorageInterface):
         )
         """)
         
+        # 创建测试集合，用于健康检查
+        self._ensure_collection("test")
+        
+        # 在测试集合中插入一条测试数据
+        try:
+            timestamp = datetime.now().isoformat()
+            cursor.execute(
+                "INSERT OR REPLACE INTO test (key, data, created_at, updated_at) VALUES (?, ?, ?, ?)",
+                ("test", json.dumps({"status": "ok"}), timestamp, timestamp)
+            )
+        except Exception as e:
+            print(f"创建测试数据失败: {e}")
+        
         # 提交更改
         self.conn.commit()
     
@@ -480,8 +584,8 @@ class Storage(StorageInterface):
         Args:
             collection: 集合名称
         """
-        # 验证集合名称，避免SQL注入
-        if not collection.isalnum():
+        # 修改验证逻辑，允许字母、数字和下划线
+        if not re.match(r'^[a-zA-Z0-9_]+$', collection):
             raise ValueError(f"无效的集合名称: {collection}")
         
         cursor = self.conn.cursor()

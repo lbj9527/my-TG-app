@@ -16,9 +16,9 @@ class StorageInterface(ABC):
     """
     
     @abstractmethod
-    def initialize(self) -> bool:
+    async def initialize(self) -> bool:
         """
-        初始化存储
+        初始化存储（异步方法）
         
         Returns:
             bool: 初始化是否成功
@@ -90,7 +90,7 @@ class StorageInterface(ABC):
         pass
     
     @abstractmethod
-    def query(self, collection: str, filter_dict: Dict[str, Any] = None, 
+    async def query(self, collection: str, filter_dict: Dict[str, Any] = None, 
              sort_by: Optional[str] = None, limit: Optional[int] = None, 
              skip: Optional[int] = None) -> List[Dict[str, Any]]:
         """
@@ -123,7 +123,7 @@ class StorageInterface(ABC):
         pass
     
     @abstractmethod
-    def ensure_index(self, collection: str, fields: List[str], unique: bool = False) -> bool:
+    async def ensure_index(self, collection: str, fields: List[str], unique: bool = False) -> bool:
         """
         确保索引存在
         

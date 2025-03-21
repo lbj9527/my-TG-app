@@ -1,53 +1,61 @@
 # TG Forwarder - 依赖包
+# 版本 v1.9.2 (2023-07-20)
+# 推荐使用清华大学镜像源安装：pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
 
 # Telegram客户端库
 pyrogram>=2.0.0
-TgCrypto>=1.2.0
+TgCrypto>=1.2.5  # 升级TgCrypto以提高安全性和性能
 
 # 网络和异步支持
-aiohttp>=3.8.0
+aiohttp>=3.8.4  # 更新到最新稳定版本，改进异步性能
 asyncio>=3.4.3
 
 # 数据验证和配置
-pydantic>=1.9.0,<2.0.0
+pydantic>=1.9.0,<2.0.0  # 保持与现有代码兼容
 
 # 日志记录
 loguru>=0.6.0
 
 # 配置管理
-python-dotenv>=0.20.0
+python-dotenv>=0.21.0  # 更新到更新的版本
 
 # 存储和数据库
-aiosqlite>=0.17.0
+aiosqlite>=0.18.0  # 更新以支持更好的异步接口
 
 # 测试
-pytest>=7.0.0
-pytest-asyncio>=0.18.0
+pytest>=7.3.1
+pytest-asyncio>=0.21.0  # 更新以支持最新的asyncio特性
+pytest-cov>=4.1.0  # 添加测试覆盖率支持
 
 # 类型检查
-mypy>=0.910
+mypy>=1.3.0  # 更新以获取更好的类型检查支持
 
 # 工具和实用程序
-aiofiles>=0.8.0
-pillow>=9.0.0  # 用于图像处理
-python-dateutil>=2.8.0
-humanize>=4.0.0
+aiofiles>=23.1.0  # 更新到最新版本
+pillow>=9.5.0  # 用于图像处理
+python-dateutil>=2.8.2
+humanize>=4.6.0  # 更新到最新版本
 pysocks>=1.7.1
-cryptography>=41.0.0
-urllib3>=2.0.0
-typing-extensions>=4.7.0
+cryptography>=41.0.3  # 安全更新
+urllib3>=2.0.3  # 安全更新
+typing-extensions>=4.7.1
 requests>=2.31.0
 
 # CLI相关
-colorama>=0.4.4
-tqdm>=4.62.0
+colorama>=0.4.6  # 统一版本
+tqdm>=4.66.1  # 统一版本，移除重复定义
 
-# 自定义媒体组上传所需
-tqdm==4.66.1
-colorama==0.4.6
-# 视频缩略图生成所需
-moviepy==2.1.2
-# moviepy依赖以下库(大部分会自动安装，列出主要依赖)
-numpy>=1.25.0
-imageio>=2.5,<3.0
-imageio-ffmpeg>=0.2.0 
+# Windows平台支持
+pywin32>=305.0; sys_platform == 'win32'  # 用于Windows信号处理
+psutil>=5.9.5  # 添加进程和系统管理支持
+
+# 视频处理
+moviepy>=2.1.2  # 视频缩略图生成所需
+numpy>=1.25.1  # moviepy依赖
+imageio>=2.31.1,<3.0  # 更新但保持主版本兼容性
+imageio-ffmpeg>=0.4.8  # 更新到最新版本
+
+# 开发工具（可选，仅开发环境需要）
+black>=23.7.0; python_version >= '3.7'  # 代码格式化工具，仅适用于Python 3.7+
+isort>=5.12.0  # 导入排序工具
+flake8>=6.0.0  # 代码检查工具 

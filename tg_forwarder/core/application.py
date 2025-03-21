@@ -44,6 +44,72 @@ class Application(ApplicationInterface):
     # 应用程序版本
     VERSION = "1.0.0"
     
+    # 添加一个全局的应用程序实例引用，用于信号处理
+    _instance = None
+    
+    @staticmethod
+    def setup_signal_handling():
+        """
+        设置全局信号处理
+        这个方法应该在主程序入口中调用
+        """
+        import signal
+        import os
+        import asyncio
+        import threading
+        
+        def global_signal_handler(sig, frame):
+            print(f"\n接收到信号 {sig}，正在关闭应用...")
+            
+            # 获取当前应用实例
+            app = Application._instance
+            if app:
+                # 尝试使用事件循环关闭应用
+                try:
+                    loop = asyncio.get_event_loop()
+                    if loop.is_running():
+                        loop.create_task(app._handle_shutdown())
+                    else:
+                        # 如果事件循环未运行，创建新的事件循环
+                        def run_shutdown():
+                            new_loop = asyncio.new_event_loop()
+                            asyncio.set_event_loop(new_loop)
+                            try:
+                                new_loop.run_until_complete(app._handle_shutdown())
+                            finally:
+                                new_loop.close()
+                        
+                        # 在新线程中运行关闭流程
+                        shutdown_thread = threading.Thread(target=run_shutdown)
+                        shutdown_thread.daemon = True
+                        shutdown_thread.start()
+                        shutdown_thread.join(timeout=5)  # 等待最多5秒
+                except Exception as e:
+                    print(f"关闭应用时出错: {e}")
+            
+            # 如果5秒内未完成关闭，强制退出
+            print("强制退出程序")
+            os._exit(0)
+        
+        # 注册全局信号处理
+        signal.signal(signal.SIGINT, global_signal_handler)
+        signal.signal(signal.SIGTERM, global_signal_handler)
+        
+        # 在Windows上设置控制台处理函数
+        if os.name == 'nt':
+            try:
+                import win32api
+                def windows_handler(ctrl_type):
+                    if ctrl_type in (0, 2):  # CTRL_C_EVENT 或 CTRL_BREAK_EVENT
+                        print("收到Windows控制事件，准备关闭应用")
+                        global_signal_handler(signal.SIGINT, None)
+                        return True  # 返回True表示我们处理了这个事件
+                    return False
+                win32api.SetConsoleCtrlHandler(windows_handler, True)
+                print("已注册Windows控制台处理函数")
+            except ImportError:
+                print("无法导入win32api模块，Windows控制台事件可能无法正确处理")
+    
     def __init__(self, config_path: str = None):
         """
         初始化应用程序
@@ -51,6 +117,9 @@ class Application(ApplicationInterface):
         Args:
             config_path: 配置文件路径，为None时使用默认路径
         """
+        # 设置全局实例引用
+        Application._instance = self
+        
         # 初始化状态
         self._initialized = False
         self._running = False
@@ -87,11 +156,17 @@ class Application(ApplicationInterface):
         try:
             self._app_logger.info("正在初始化应用...")
             
+            # 添加关闭标志
+            self._shutting_down = False
+            
             # 加载配置
-            self._config.load()
+            config_loaded = self._config.load_config()
+            if not config_loaded:
+                self._app_logger.error("加载配置失败，应用无法初始化")
+                return False
             
             # 初始化日志记录器
-            log_config = self._config.get_value("log") or {}
+            log_config = self._config.get("log") or {}
             log_file = log_config.get("file", "logs/tg_forwarder.log")
             log_level = log_config.get("level", "INFO")
             log_rotation = log_config.get("rotation", "10 MB")
@@ -99,9 +174,9 @@ class Application(ApplicationInterface):
             self._logger.initialize(log_file, log_level, log_rotation)
             
             # 初始化存储
-            storage_config = self._config.get_value("storage") or {}
+            storage_config = self._config.get("storage") or {}
             db_path = storage_config.get("db_path", "data/tg_forwarder.db")
-            self._storage = Storage(db_path, self._logger)
+            self._storage = Storage(db_path)
             await self._storage.initialize()
             
             # 初始化状态追踪器
@@ -109,36 +184,33 @@ class Application(ApplicationInterface):
             await self._status_tracker.initialize()
             
             # 初始化任务管理器
-            task_config = self._config.get_value("task_manager") or {}
-            max_workers = task_config.get("max_workers", 10)
+            task_manager_config = self._config.get("task_manager") or {}
+            max_workers = task_manager_config.get("max_workers", 5)
             self._task_manager = TaskManager(self._logger)
-            await self._task_manager.initialize(max_workers)
+            self._task_manager.initialize(max_workers)
             
             # 初始化Telegram客户端
-            telegram_config = self._config.get_value("telegram") or {}
-            self._client = TelegramClient(telegram_config, self._logger)
+            self._client = TelegramClient(self._config, self._logger)
             
             # 初始化下载器
-            download_config = self._config.get_value("download") or {}
-            download_dir = download_config.get("directory", "downloads")
+            download_config = self._config.get("download") or {}
             self._downloader = Downloader(
                 self._client,
-                self._status_tracker,
-                self._task_manager,
                 self._config,
                 self._logger,
-                download_dir
+                self._storage,
+                self._status_tracker
             )
             await self._downloader.initialize()
             
             # 初始化上传器
-            upload_config = self._config.get_value("upload") or {}
+            upload_config = self._config.get("upload") or {}
             self._uploader = Uploader(
                 self._client,
-                self._status_tracker,
-                self._task_manager,
                 self._config,
-                self._logger
+                self._logger,
+                self._storage,
+                self._status_tracker
             )
             await self._uploader.initialize()
             
@@ -170,7 +242,45 @@ class Application(ApplicationInterface):
         
         except Exception as e:
             self._app_logger.error(f"应用初始化失败: {str(e)}", exc_info=True)
-            await self.shutdown()
+            
+            # 按顺序关闭已初始化的组件
+            try:
+                # 依次关闭每个已创建的组件
+                components_to_close = [
+                    (self._forwarder, "shutdown", "转发器"),
+                    (self._uploader, "shutdown", "上传器"),
+                    (self._downloader, "shutdown", "下载器"),
+                    (self._client, "disconnect", "客户端"),
+                    (self._task_manager, "shutdown", "任务管理器"),
+                    (self._status_tracker, "shutdown", "状态追踪器"),
+                    (self._storage, "close", "存储")
+                ]
+                
+                for component, method_name, component_name in components_to_close:
+                    if component is not None:
+                        try:
+                            close_method = getattr(component, method_name, None)
+                            if close_method is not None and callable(close_method):
+                                # 特殊处理任务管理器的关闭，因为它不是异步方法
+                                if component is self._task_manager and method_name == "shutdown":
+                                    close_method(wait=True)
+                                else:
+                                    result = close_method()
+                                    
+                                    if asyncio.iscoroutine(result):
+                                        await result
+                                self._app_logger.debug(f"{component_name}已关闭")
+                        except Exception as component_error:
+                            self._app_logger.error(f"关闭{component_name}时出错: {str(component_error)}")
+                
+                # 关闭日志记录器
+                if self._logger:
+                    self._logger.shutdown()
+                
+                self._app_logger.info("已清理初始化失败的资源")
+            except Exception as cleanup_error:
+                self._app_logger.error(f"清理资源时出错: {str(cleanup_error)}")
+            
             return False
     
     async def shutdown(self) -> None:
@@ -201,10 +311,11 @@ class Application(ApplicationInterface):
             await self._client.disconnect()
         
         if self._task_manager:
-            await self._task_manager.shutdown(wait=True)
+            # TaskManager.shutdown 不是异步方法，不需要await
+            self._task_manager.shutdown(wait=True)
         
         if self._status_tracker:
-            await self._status_tracker.shutdown()
+            self._status_tracker.shutdown()
         
         if self._storage:
             await self._storage.close()
@@ -823,16 +934,68 @@ class Application(ApplicationInterface):
             import signal
             
             def signal_handler(sig, frame):
+                print(f"\n收到信号 {sig}，正在关闭应用...")
                 self._app_logger.info(f"收到信号 {sig}，准备关闭应用")
-                asyncio.create_task(self.shutdown())
+                
+                # 直接使用os._exit()退出程序，不尝试进行优雅关闭
+                # 这对CTRL+C响应更为可靠，尤其在Windows环境
+                print("程序退出中...")
+                os._exit(0)
             
             # 注册 SIGINT 和 SIGTERM 信号处理器
             signal.signal(signal.SIGINT, signal_handler)
             signal.signal(signal.SIGTERM, signal_handler)
             
-        except (ImportError, AttributeError):
+            # 在Windows上，设置更直接的控制台处理函数
+            if os.name == 'nt':
+                try:
+                    import win32api
+                    def windows_handler(ctrl_type):
+                        if ctrl_type in (0, 2):  # CTRL_C_EVENT 或 CTRL_BREAK_EVENT
+                            print("\n收到Windows控制事件，强制退出程序...")
+                            self._app_logger.info("收到Windows控制事件，强制退出程序")
+                            # 直接退出，不尝试优雅关闭
+                            os._exit(0)
+                            return True  # 返回True表示我们处理了这个事件
+                        return False
+                    win32api.SetConsoleCtrlHandler(windows_handler, True)
+                    self._app_logger.info("已注册Windows控制台处理函数")
+                except ImportError:
+                    self._app_logger.warning("无法导入win32api模块，Windows控制台事件可能无法正确处理")
+        
+        except (ImportError, AttributeError) as e:
             # Windows可能不支持某些信号
-            self._app_logger.warning("无法注册所有信号处理器")
+            self._app_logger.warning(f"无法注册所有信号处理器: {e}")
+    
+    async def _handle_shutdown(self) -> None:
+        """处理应用关闭的辅助方法"""
+        self._app_logger.info("正在处理应用关闭...")
+        try:
+            # 设置关闭标志，防止重复关闭
+            if hasattr(self, '_shutting_down') and self._shutting_down:
+                self._app_logger.info("应用已经在关闭过程中")
+                return
+            
+            # 设置关闭标志
+            self._shutting_down = True
+            
+            # 停止转发服务
+            if self._running:
+                try:
+                    await self.stop_forwarding()
+                except Exception as e:
+                    self._app_logger.error(f"停止转发服务失败: {e}")
+            
+            # 执行完整的关闭流程
+            await self.shutdown()
+            
+            # 强制结束程序，避免事件循环中的其他任务阻止退出
+            self._app_logger.info("应用已完全关闭，退出程序")
+            os._exit(0)
+        except Exception as e:
+            self._app_logger.error(f"关闭处理过程中出错: {e}")
+            # 出现错误时，强制退出
+            os._exit(1)
     
     async def _check_client_connection(self) -> bool:
         """
@@ -845,13 +1008,38 @@ class Application(ApplicationInterface):
             return False
         
         try:
-            if not hasattr(self._client, "is_connected") or not self._client.is_connected():
-                await self._client.connect()
+            # 检查客户端是否已连接
+            is_connected = False
+            if hasattr(self._client, "is_connected"):
+                try:
+                    # 如果is_connected是一个方法而不是属性
+                    if callable(self._client.is_connected):
+                        is_connected_result = self._client.is_connected()
+                        # 检查是否为协程对象
+                        if asyncio.iscoroutine(is_connected_result):
+                            is_connected = await is_connected_result
+                        else:
+                            is_connected = is_connected_result
+                    else:
+                        # 如果是属性而不是方法
+                        is_connected = self._client.is_connected
+                except Exception:
+                    is_connected = False
+            
+            # 如果客户端未连接，尝试连接
+            if not is_connected:
+                try:
+                    await self._client.connect()
+                except Exception:
+                    return False
             
             # 尝试获取自身信息以验证连接
-            me = await self._client.get_me()
-            return me is not None
-        except:
+            try:
+                me = await self._client.get_me()
+                return me is not None
+            except Exception:
+                return False
+        except Exception:
             return False
     
     async def _check_storage(self) -> bool:
@@ -865,8 +1053,9 @@ class Application(ApplicationInterface):
             return False
         
         try:
-            # 尝试执行简单查询
-            test_result = await self._storage.query("test", "SELECT 1")
+            # 尝试执行简单查询测试
+            test_result = await self._storage.query("test")
             return True
-        except:
+        except Exception as e:
+            self._app_logger.error(f"存储检查失败: {e}")
             return False 

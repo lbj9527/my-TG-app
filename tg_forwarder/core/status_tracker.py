@@ -6,6 +6,7 @@
 import uuid
 from typing import Dict, Any, List, Union, Optional
 from datetime import datetime, timedelta
+import threading
 
 from tg_forwarder.interfaces.status_tracker_interface import StatusTrackerInterface
 from tg_forwarder.interfaces.storage_interface import StorageInterface
@@ -30,8 +31,12 @@ class StatusTracker(StatusTrackerInterface):
         self._logger = logger.get_logger("StatusTracker")
         self._collection_name = "forwarding_tasks"
         self._initialized = False
+        self._status_cache = {}
+        self._last_updated = {}
+        self._cache_ttl = 300  # 默认缓存有效期为5分钟
+        self._lock = threading.RLock()
     
-    def initialize(self) -> bool:
+    async def initialize(self) -> bool:
         """
         初始化状态追踪器
         
@@ -45,8 +50,7 @@ class StatusTracker(StatusTrackerInterface):
                 return False
             
             # 确保索引存在
-            self._storage.ensure_index(self._collection_name, ["key"], unique=True)
-            self._storage.ensure_index(self._collection_name, ["created_at"])
+            await self._ensure_indexes()
             
             self._initialized = True
             self._logger.info("状态追踪器初始化完成")
@@ -56,10 +60,33 @@ class StatusTracker(StatusTrackerInterface):
             self._initialized = False
             return False
     
+    async def _ensure_indexes(self):
+        """确保必要的索引存在"""
+        # 为转发任务创建索引
+        await self._storage.ensure_index(self._collection_name, ["source_chat_id", "message_id"], unique=True)
+        await self._storage.ensure_index(self._collection_name, ["status"])
+        await self._storage.ensure_index(self._collection_name, ["created_at"])
+        
+        # 为频道状态创建索引
+        await self._storage.ensure_index("channel_status", ["chat_id"], unique=True)
+        
+        # 为系统状态创建索引
+        await self._storage.ensure_index("system_status", ["component"], unique=True)
+    
     def shutdown(self) -> None:
         """关闭状态追踪器，释放资源"""
-        self._initialized = False
-        self._logger.info("状态追踪器已关闭")
+        with self._lock:
+            self._initialized = False
+            self._logger.info("状态追踪器已关闭")
+    
+    def is_initialized(self) -> bool:
+        """
+        检查状态追踪器是否已初始化
+        
+        Returns:
+            bool: 状态追踪器是否已初始化
+        """
+        return self._initialized
     
     def record_download_start(self, chat_id: Union[str, int], message_id: int, media_group_id: Optional[str] = None) -> str:
         """

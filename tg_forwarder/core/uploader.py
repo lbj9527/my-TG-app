@@ -63,7 +63,7 @@ class Uploader(UploaderInterface):
         """
         try:
             # 创建上传信号量
-            max_concurrent_uploads = self._config.get_max_concurrent_uploads(5)
+            max_concurrent_uploads = self._config.get_max_concurrent_uploads()
             self._upload_semaphore = asyncio.Semaphore(max_concurrent_uploads)
             
             # 创建临时目录
@@ -97,6 +97,15 @@ class Uploader(UploaderInterface):
             self._logger.info("上传器已关闭")
         except Exception as e:
             self._logger.error(f"关闭上传器时发生错误: {str(e)}", exc_info=True)
+    
+    def is_initialized(self) -> bool:
+        """
+        检查上传器是否已初始化
+        
+        Returns:
+            bool: 上传器是否已初始化
+        """
+        return self._initialized
     
     async def upload_batch(self, batch_data: Dict[str, Any]) -> Dict[str, Any]:
         """

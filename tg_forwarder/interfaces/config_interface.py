@@ -50,6 +50,20 @@ class ConfigInterface(ABC):
         pass
     
     @abstractmethod
+    def get_value(self, key: str, default: Optional[T] = None) -> T:
+        """
+        获取配置项（与get方法相同，用于向后兼容）
+        
+        Args:
+            key: 配置键，支持点号分隔的路径，如 "api.api_id"
+            default: 默认值
+            
+        Returns:
+            配置值，若不存在则返回默认值
+        """
+        pass
+    
+    @abstractmethod
     def set(self, key: str, value: Any) -> None:
         """
         设置配置项
@@ -107,6 +121,39 @@ class ConfigInterface(ABC):
         
         Returns:
             List[Union[str, int]]: 目标频道列表
+        """
+        pass
+    
+    @abstractmethod
+    def get_forward_config(self) -> Dict[str, Any]:
+        """
+        获取转发配置
+        
+        Returns:
+            Dict[str, Any]: 转发配置字典，包含start_message_id、end_message_id等参数
+        """
+        pass
+    
+    @abstractmethod
+    def get_channel_pairs(self) -> Dict[str, List[Union[str, int]]]:
+        """
+        获取频道配对信息（源频道到目标频道的映射）
+        
+        Returns:
+            Dict[str, List[Union[str, int]]]: 源频道到目标频道的映射字典
+        """
+        pass
+    
+    @abstractmethod
+    def get_source_channel_config(self, channel_id: str) -> Dict[str, Any]:
+        """
+        获取特定源频道的配置
+        
+        Args:
+            channel_id: 源频道ID或URL
+            
+        Returns:
+            Dict[str, Any]: 源频道配置字典
         """
         pass
     

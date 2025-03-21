@@ -3,6 +3,9 @@
 """
 TG Forwarder 应用程序入口点
 提供命令行接口和应用程序启动功能
+
+版本: v1.9.2
+更新日期: 2023-07-20
 """
 
 import os
@@ -135,7 +138,7 @@ def setup_argument_parser() -> argparse.ArgumentParser:
 
 async def start_application(args: argparse.Namespace) -> None:
     """
-    启动应用程序
+    启动应用
     
     Args:
         args: 命令行参数
@@ -145,13 +148,9 @@ async def start_application(args: argparse.Namespace) -> None:
     # 创建应用实例
     app = Application(config_path=args.config)
     
-    # 设置信号处理
-    loop = asyncio.get_event_loop()
-    for sig in (signal.SIGINT, signal.SIGTERM):
-        loop.add_signal_handler(
-            sig,
-            lambda s=sig: asyncio.create_task(handle_exit(s, app, loop))
-        )
+    # 使用Application类中的全局信号处理设置
+    # 这将处理所有平台上的信号，包括Windows
+    Application.setup_signal_handling()
     
     # 初始化应用
     init_success = await app.initialize()
@@ -176,7 +175,13 @@ async def start_application(args: argparse.Namespace) -> None:
     except asyncio.CancelledError:
         pass
     finally:
-        await app.shutdown()
+        # 尝试优雅关闭，但如果失败，直接退出
+        try:
+            await asyncio.wait_for(app.shutdown(), timeout=5.0)
+        except (asyncio.TimeoutError, Exception) as e:
+            print(f"关闭应用时遇到问题: {e}")
+            print("强制退出程序")
+            os._exit(0)
 
 
 async def forward_control(args: argparse.Namespace) -> None:
@@ -364,26 +369,6 @@ async def show_version(args: argparse.Namespace) -> None:
     app = Application(config_path=args.config)
     version = app.get_version()
     print(f"TG Forwarder 版本: {version}")
-
-
-async def handle_exit(sig: signal.Signals, app: Application, loop: asyncio.AbstractEventLoop) -> None:
-    """
-    处理退出信号
-    
-    Args:
-        sig: 信号
-        app: 应用实例
-        loop: 事件循环
-    """
-    print(f"收到信号 {sig.name}，正在关闭应用...")
-    await app.shutdown()
-    tasks = [task for task in asyncio.all_tasks() if task is not asyncio.current_task()]
-    
-    for task in tasks:
-        task.cancel()
-    
-    await asyncio.gather(*tasks, return_exceptions=True)
-    loop.stop()
 
 
 def main() -> None:

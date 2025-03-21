@@ -94,6 +94,15 @@ class Downloader(DownloaderInterface):
         except Exception as e:
             self._logger.error(f"关闭下载器时发生错误: {str(e)}", exc_info=True)
     
+    def is_initialized(self) -> bool:
+        """
+        检查下载器是否已初始化
+        
+        Returns:
+            bool: 下载器是否已初始化
+        """
+        return self._initialized
+    
     async def download_media_batch(self, batch: Dict[str, Any]) -> Dict[str, Any]:
         """
         下载批量媒体文件

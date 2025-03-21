@@ -18,6 +18,7 @@ TG Forwarder 是一个功能强大的 Telegram 消息转发工具，用于在不
 
 - Python 3.7 或更高版本
 - 安装了 pip 包管理器
+- 在Windows平台上需要安装pywin32（用于信号处理）
 
 ## 安装步骤
 
@@ -43,7 +44,14 @@ TG Forwarder 是一个功能强大的 Telegram 消息转发工具，用于在不
 3. 安装所需依赖：
 
    ```bash
+   # 使用默认源安装
    pip install -r requirements.txt
+   
+   # 推荐：使用清华大学镜像源加速安装（国内用户）
+   pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
+   
+   # Windows平台可能需要额外安装pywin32
+   # pip install pywin32
    ```
 
 4. 创建必要的目录：
@@ -54,6 +62,21 @@ TG Forwarder 是一个功能强大的 Telegram 消息转发工具，用于在不
 ## 配置
 
 TG Forwarder 使用 JSON 格式的配置文件。示例配置文件位于 `config/config.json`。
+
+### 依赖说明
+
+TG Forwarder 使用多个关键依赖包，主要包括：
+
+- **pyrogram**: Telegram API的Python客户端库，用于访问Telegram功能
+- **TgCrypto**: 加密库，加速Telegram API通信
+- **aiohttp/asyncio**: 异步网络和协程支持，提供高效的并发操作
+- **pydantic**: 数据验证和设置管理
+- **loguru**: 简化的日志记录系统，提供详细的错误追踪
+- **aiosqlite**: 异步SQLite数据库接口，用于数据存储
+- **pywin32**: Windows平台特定功能支持，处理信号和系统调用
+- **moviepy**: 视频处理库，用于生成缩略图和处理媒体
+
+完整的依赖列表请参考 `requirements.txt` 文件。
 
 ### 必要配置
 
@@ -224,10 +247,24 @@ python run.py version
    - 检查是否达到 Telegram API 限制
    - 查看日志文件获取详细错误信息
 
-3. **应用崩溃**
+3. **Windows平台启动错误 (NotImplementedError)**
+
+   - 这个错误是由于Windows平台不支持Unix风格的信号处理机制导致的
+   - 确保已安装pywin32包：`pip install pywin32`
+   - 如果在v1.9.1或更高版本仍然遇到此问题，请检查pywin32是否正确安装
+   - 可以尝试重新安装pywin32：`pip uninstall pywin32 && pip install pywin32`
+   - 更新到v1.9.2或更高版本，此版本进一步改进了Windows平台兼容性
+
+4. **应用崩溃**
    - 检查日志文件了解错误原因
    - 确保配置文件格式正确
    - 尝试以调试模式运行: `python run.py -l DEBUG start`
+
+5. **接口兼容性问题**
+   - 如果遇到接口异步或同步方法的兼容性问题，请确保升级到v1.9.2或更高版本
+   - 这些问题通常表现为`TypeError: object bool can't be used in 'await' expression`错误
+   - 如果继续遇到问题，可能需要手动检查并确保所有接口和实现类的异步方法签名一致
+   - 确保有关文件存储和状态跟踪的操作正确使用异步方法
 
 ### 联系支持
 
@@ -247,7 +284,20 @@ python run.py version
 
 ## 版本更新记录
 
-### v1.9.0 (2025-03-25)
+### v1.9.2 (2023-07-20)
+- 修复多个接口异步兼容性问题，确保接口定义与实现一致
+- 更新Storage类和StatusTracker类的异步方法实现
+- 修正Application类中对ConfigManager错误方法调用的问题
+- 优化初始化流程，提高应用启动稳定性
+- 增强Windows平台支持，改善跨平台兼容性
+
+### v1.9.1 (2023-07-15)
+- 修复Windows平台上的信号处理兼容性问题(NotImplementedError)
+- 添加pywin32依赖支持Windows平台的优雅关闭
+- 优化启动和退出流程
+- 提高跨平台兼容性
+
+### v1.9.0 (2023-03-25)
 
 #### 项目架构改进与模块化重组
 

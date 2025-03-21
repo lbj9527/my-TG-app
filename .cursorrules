@@ -217,4 +217,9 @@
 
 ## 参考文档
 请参考 Pyrogram 文档（https://docs.pyrogram.org/）以及 Telegram Bot API 文档（https://core.telegram.org/bots/api）中的说明，理解和遵循最佳实践。
-对于Qt开发，参考Qt官方文档（https://doc.qt.io/）以及PyQt/PySide文档（https://www.riverbankcomputing.com/static/Docs/PyQt6/）。 
+对于Qt开发，参考Qt官方文档（https://doc.qt.io/）以及PyQt/PySide文档（https://www.riverbankcomputing.com/static/Docs/PyQt6/）。
+
+## Python包安装规则
+- 安装Python包时，使用清华大学镜像源加速下载：使用 `-i https://pypi.tuna.tsinghua.edu.cn/simple` 参数
+- 示例: `pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple`
+- 示例: `pip install package_name -i https://pypi.tuna.tsinghua.edu.cn/simple` 

@@ -40,12 +40,7 @@ class TelegramClient(TelegramClientInterface):
         self._max_flood_wait_retries = 3
     
     async def connect(self) -> None:
-        """
-        连接到Telegram API
-        
-        Raises:
-            Exception: 连接失败时抛出
-        """
+        """连接到Telegram API"""
         if self._connected:
             self._logger.info("客户端已连接")
             return
@@ -58,22 +53,58 @@ class TelegramClient(TelegramClientInterface):
             pyrogram_logger.setLevel(logging.WARNING)
             
             # 创建客户端实例
-            api_id = self._config.get_telegram_api_id()
-            api_hash = self._config.get_telegram_api_hash()
-            session_name = self._config.get_session_name()
+            try:
+                # 使用配置接口的方法获取API值
+                api_id = self._config.get_telegram_api_id()
+                api_hash = self._config.get_telegram_api_hash()
+                session_name = self._config.get_session_name()
+            except AttributeError:
+                # 如果配置对象没有特定方法，尝试从配置中直接获取
+                api_id = self._config.get('telegram.api_id')
+                if api_id is None:
+                    raise ValueError("配置中缺少API ID")
+                
+                api_hash = self._config.get('telegram.api_hash')
+                if api_hash is None:
+                    raise ValueError("配置中缺少API Hash")
+                
+                session_name = self._config.get('telegram.session_name', 'tg_forwarder')
             
             # 确保会话目录存在
             session_dir = os.path.dirname(session_name)
             if session_dir and not os.path.exists(session_dir):
                 os.makedirs(session_dir)
             
+            # 获取代理配置
+            proxy_config = None
+            try:
+                proxy_settings = self._config.get('telegram.proxy', {})
+                if proxy_settings and proxy_settings.get('enabled', False):
+                    proxy_type = proxy_settings.get('type', 'socks5').upper()
+                    proxy_config = {
+                        "scheme": proxy_type,
+                        "hostname": proxy_settings.get('host'),
+                        "port": proxy_settings.get('port'),
+                        "username": proxy_settings.get('username') or None,
+                        "password": proxy_settings.get('password') or None
+                    }
+                    self._logger.info(f"将使用{proxy_type}代理: {proxy_settings.get('host')}:{proxy_settings.get('port')}")
+            except Exception as e:
+                self._logger.warning(f"读取代理配置时出错: {str(e)}，将不使用代理")
+            
             # 创建并连接客户端
-            self._client = Client(
-                name=session_name,
-                api_id=api_id,
-                api_hash=api_hash,
-                no_updates=True  # 不接收更新，减少资源消耗
-            )
+            client_params = {
+                "name": session_name,
+                "api_id": api_id,
+                "api_hash": api_hash,
+                "no_updates": True  # 不接收更新，减少资源消耗
+            }
+            
+            # 添加代理参数
+            if proxy_config:
+                client_params["proxy"] = proxy_config
+            
+            self._client = Client(**client_params)
             
             await self._client.start()
             self._connected = True

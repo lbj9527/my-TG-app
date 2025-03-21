@@ -15,9 +15,9 @@ class StatusTrackerInterface(ABC):
     """
     
     @abstractmethod
-    def initialize(self) -> bool:
+    async def initialize(self) -> bool:
         """
-        初始化状态跟踪器
+        初始化状态跟踪器（异步方法）
         
         Returns:
             bool: 初始化是否成功
