@@ -64,24 +64,6 @@ class MessageSender:
         
         # 处理私密频道链接
         target_chat_id = channel_id
-        # if isinstance(channel_id, str) and (channel_id.startswith('+') or 't.me/+' in channel_id):
-        #     # 如果是纯邀请码格式，转换为完整链接
-        #     if channel_id.startswith('+') and '/' not in channel_id:
-        #         channel_id = f"https://t.me/{channel_id}"
-            
-        #     logger.info(f"处理媒体组发送的私密频道链接: {channel_id}")
-            
-        #     # 尝试获取实际chat实体和ID
-        #     try:
-        #         chat_entity = await self.client_manager.client.get_chat(channel_id)
-        #         if chat_entity:
-        #             target_chat_id = chat_entity.id
-        #             logger.info(f"成功获取私密频道ID: {target_chat_id}")
-        #         else:
-        #             return {"success": False, "error": f"无法获取私密频道实体: {channel_id}"}
-        #     except Exception as e:
-        #         logger.error(f"获取私密频道实体时出错: {str(e)}")
-        #         return {"success": False, "error": f"无法处理私密频道链接: {str(e)}"}
         
         # 创建媒体组
         media_group = MediaUtils.create_media_group(messages)
@@ -166,24 +148,6 @@ class MessageSender:
         
         # 处理私密频道链接
         target_chat_id = channel_id
-        # if isinstance(channel_id, str) and (channel_id.startswith('+') or 't.me/+' in channel_id):
-        #     # 如果是纯邀请码格式，转换为完整链接
-        #     if channel_id.startswith('+') and '/' not in channel_id:
-        #         channel_id = f"https://t.me/{channel_id}"
-            
-        #     logger.info(f"处理单条消息发送的私密频道链接: {channel_id}")
-            
-        #     # 尝试获取实际chat实体和ID
-        #     try:
-        #         chat_entity = await self.client_manager.client.get_chat(channel_id)
-        #         if chat_entity:
-        #             target_chat_id = chat_entity.id
-        #             logger.info(f"成功获取私密频道ID: {target_chat_id}")
-        #         else:
-        #             return {"success": False, "error": f"无法获取私密频道实体: {channel_id}"}
-        #     except Exception as e:
-        #         logger.error(f"获取私密频道实体时出错: {str(e)}")
-        #         return {"success": False, "error": f"无法处理私密频道链接: {str(e)}"}
         
         message_id = message.get("message_id")
         message_type = message.get("message_type")
@@ -326,8 +290,6 @@ class MessageSender:
             return {"success": False, "error": "客户端未初始化"}
         
         # 使用channel_utils获取实际聊天ID
-        # target_chat_id = self.channel_utils.get_actual_chat_id(target_channel)
-        # source_chat_id = self.channel_utils.get_actual_chat_id(source_channel)
         target_chat_id = target_channel
         source_chat_id = source_channel
         
@@ -388,8 +350,6 @@ class MessageSender:
             return {"success": False, "error": "客户端未初始化"}
         
         # 使用channel_utils获取实际聊天ID
-        # target_chat_id = self.channel_utils.get_actual_chat_id(target_channel)
-        # source_chat_id = self.channel_utils.get_actual_chat_id(source_channel)
         target_chat_id = target_channel
         source_chat_id = source_channel
         
