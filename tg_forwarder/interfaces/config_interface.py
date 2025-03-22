@@ -105,22 +105,22 @@ class ConfigInterface(ABC):
         pass
     
     @abstractmethod
-    def get_source_channels(self) -> List[Union[str, int]]:
+    def get_download_config(self) -> Dict[str, Any]:
         """
-        获取源频道列表
+        获取下载配置
         
         Returns:
-            List[Union[str, int]]: 源频道列表
+            Dict[str, Any]: 下载配置字典，包含source_channels、directory、timeout等参数
         """
         pass
     
     @abstractmethod
-    def get_target_channels(self) -> List[Union[str, int]]:
+    def get_upload_config(self) -> Dict[str, Any]:
         """
-        获取目标频道列表
+        获取上传配置
         
         Returns:
-            List[Union[str, int]]: 目标频道列表
+            Dict[str, Any]: 上传配置字典，包含target_channels、directory、timeout等参数
         """
         pass
     
@@ -130,30 +130,27 @@ class ConfigInterface(ABC):
         获取转发配置
         
         Returns:
-            Dict[str, Any]: 转发配置字典，包含start_message_id、end_message_id等参数
+            Dict[str, Any]: 转发配置字典，包含channel_pairs、start_id、end_id等参数
         """
         pass
     
     @abstractmethod
-    def get_channel_pairs(self) -> Dict[str, List[Union[str, int]]]:
+    def get_monitor_config(self) -> Dict[str, Any]:
         """
-        获取频道配对信息（源频道到目标频道的映射）
+        获取监听配置
         
         Returns:
-            Dict[str, List[Union[str, int]]]: 源频道到目标频道的映射字典
+            Dict[str, Any]: 监听配置字典，包含channel_pairs、duration、forward_delay等参数
         """
         pass
     
     @abstractmethod
-    def get_source_channel_config(self, channel_id: str) -> Dict[str, Any]:
+    def get_storage_config(self) -> Dict[str, Any]:
         """
-        获取特定源频道的配置
+        获取存储配置
         
-        Args:
-            channel_id: 源频道ID或URL
-            
         Returns:
-            Dict[str, Any]: 源频道配置字典
+            Dict[str, Any]: 存储配置字典，包含tmp_path等参数
         """
         pass
     

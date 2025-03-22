@@ -20,19 +20,21 @@ from tg_forwarder.interfaces.uploader_interface import UploaderInterface
 from tg_forwarder.interfaces.forwarder_interface import ForwarderInterface
 from tg_forwarder.interfaces.config_interface import ConfigInterface
 from tg_forwarder.interfaces.status_tracker_interface import StatusTrackerInterface
-from tg_forwarder.interfaces.task_manager_interface import TaskManagerInterface
 from tg_forwarder.interfaces.storage_interface import StorageInterface
 from tg_forwarder.interfaces.logger_interface import LoggerInterface
+from tg_forwarder.interfaces.json_storage_interface import JsonStorageInterface
+from tg_forwarder.interfaces.history_tracker_interface import HistoryTrackerInterface
 
 from tg_forwarder.core.config_manager import ConfigManager
 from tg_forwarder.core.logger import Logger
 from tg_forwarder.core.storage import Storage
 from tg_forwarder.core.status_tracker import StatusTracker
-from tg_forwarder.core.task_manager import TaskManager
 from tg_forwarder.core.telegram_client import TelegramClient
 from tg_forwarder.core.downloader import Downloader
 from tg_forwarder.core.uploader import Uploader
 from tg_forwarder.core.forwarder import Forwarder
+from tg_forwarder.core.json_storage import JsonStorage
+from tg_forwarder.core.history_tracker import HistoryTracker
 
 
 class Application(ApplicationInterface):
@@ -42,7 +44,7 @@ class Application(ApplicationInterface):
     """
     
     # 应用程序版本
-    VERSION = "1.0.0"
+    VERSION = "0.2.8"
     
     # 添加一个全局的应用程序实例引用，用于信号处理
     _instance = None
@@ -51,68 +53,76 @@ class Application(ApplicationInterface):
     def setup_signal_handling():
         """
         设置全局信号处理
-        这个方法应该在主程序入口中调用
+        这必须在创建实例之前调用，以便准备好处理信号
         """
         import signal
+        import sys
         import os
-        import asyncio
-        import threading
         
         def global_signal_handler(sig, frame):
-            print(f"\n接收到信号 {sig}，正在关闭应用...")
-            
-            # 获取当前应用实例
-            app = Application._instance
-            if app:
-                # 尝试使用事件循环关闭应用
+            """
+            顶层信号处理函数，将信号转发到应用实例
+            """
+            if Application._instance is not None:
+                print(f"\n接收到信号 {sig}，正在优雅关闭...")
+                
+                # 使用asyncio处理关闭流程
+                import asyncio
+                
+                # 获取或创建事件循环
                 try:
                     loop = asyncio.get_event_loop()
-                    if loop.is_running():
-                        loop.create_task(app._handle_shutdown())
-                    else:
-                        # 如果事件循环未运行，创建新的事件循环
-                        def run_shutdown():
-                            new_loop = asyncio.new_event_loop()
-                            asyncio.set_event_loop(new_loop)
-                            try:
-                                new_loop.run_until_complete(app._handle_shutdown())
-                            finally:
-                                new_loop.close()
-                        
-                        # 在新线程中运行关闭流程
-                        shutdown_thread = threading.Thread(target=run_shutdown)
-                        shutdown_thread.daemon = True
-                        shutdown_thread.start()
-                        shutdown_thread.join(timeout=5)  # 等待最多5秒
-                except Exception as e:
-                    print(f"关闭应用时出错: {e}")
-            
-            # 如果5秒内未完成关闭，强制退出
-            print("强制退出程序")
-            os._exit(0)
+                except RuntimeError:
+                    # 如果没有事件循环，则创建一个新的
+                    loop = asyncio.new_event_loop()
+                    asyncio.set_event_loop(loop)
+                
+                if loop.is_running():
+                    # 如果循环正在运行，使用call_soon_threadsafe安排关闭函数
+                    def run_shutdown():
+                        asyncio.create_task(Application._instance._handle_shutdown())
+                    
+                    loop.call_soon_threadsafe(run_shutdown)
+                else:
+                    # 如果循环没有运行，直接运行关闭函数
+                    loop.run_until_complete(Application._instance._handle_shutdown())
+                
+                # 等待1秒，让关闭过程开始
+                time.sleep(1)
+                
+                print("应用程序已关闭。")
+                
+                # 在特定平台安全退出
+                if sys.platform == 'win32':
+                    os._exit(0)
+                else:
+                    os.kill(os.getpid(), signal.SIGKILL)
         
-        # 注册全局信号处理
-        signal.signal(signal.SIGINT, global_signal_handler)
-        signal.signal(signal.SIGTERM, global_signal_handler)
-        
-        # 在Windows上设置控制台处理函数
-        if os.name == 'nt':
+        # 为Unix信号注册处理程序
+        if sys.platform != 'win32':
+            signal.signal(signal.SIGINT, global_signal_handler)
+            signal.signal(signal.SIGTERM, global_signal_handler)
+        else:
+            # Windows平台处理
             try:
+                # 尝试导入win32api模块
                 import win32api
+                
                 def windows_handler(ctrl_type):
-                    if ctrl_type in (0, 2):  # CTRL_C_EVENT 或 CTRL_BREAK_EVENT
-                        print("收到Windows控制事件，准备关闭应用")
+                    """Windows CTRL事件处理器"""
+                    if ctrl_type in (0, 2, 6):  # CTRL+C, CTRL+BREAK, CTRL+CLOSE
                         global_signal_handler(signal.SIGINT, None)
-                        return True  # 返回True表示我们处理了这个事件
+                        return True  # 不继续其他处理器
                     return False
-                win32api.SetConsoleCtrlHandler(windows_handler, True)
-                print("已注册Windows控制台处理函数")
+                
+                win32api.SetConsoleCtrlHandler(windows_handler, 1)
             except ImportError:
-                print("无法导入win32api模块，Windows控制台事件可能无法正确处理")
+                # 如果无法导入win32api，则使用标准信号处理
+                signal.signal(signal.SIGINT, global_signal_handler)
     
     def __init__(self, config_path: str = None):
         """
-        初始化应用程序
+        初始化Application实例
         
         Args:
             config_path: 配置文件路径，为None时使用默认路径
@@ -120,27 +130,46 @@ class Application(ApplicationInterface):
         # 设置全局实例引用
         Application._instance = self
         
-        # 初始化状态
-        self._initialized = False
-        self._running = False
-        self._event_handlers = {}
-        self._start_time = None
+        # 初始化一个简单的日志器用于初始化过程
+        import logging
+        self._app_logger = logging.getLogger("Application")
         
-        # 创建并初始化配置管理器
+        # 创建应用组件
         self._config = ConfigManager(config_path)
-        
-        # 创建日志记录器
         self._logger = Logger()
-        self._app_logger = self._logger.get_logger("Application")
         
-        # 其他组件将在initialize方法中初始化
+        # 状态变量
+        self._initialized = False
+        self._shutting_down = False
+        self._start_time = 0
+        
+        # 组件实例
         self._storage = None
+        self._json_storage = None
+        self._history_tracker = None
         self._status_tracker = None
-        self._task_manager = None
+        
+        # 事件处理器注册表
+        self._event_handlers = {}
+        
+        # 核心组件
         self._client = None
         self._downloader = None
         self._uploader = None
         self._forwarder = None
+        
+        # 新增成员变量
+        self._running = False
+        self._db_manager = None
+        self._translation_manager = None
+        
+        # 监听相关成员变量
+        self._monitor_status = {
+            "running": False,
+            "last_monitor_id": None,
+            "last_duration": 0,
+            "messages_forwarded": 0
+        }
     
     async def initialize(self) -> bool:
         """
@@ -150,81 +179,137 @@ class Application(ApplicationInterface):
             bool: 初始化是否成功
         """
         if self._initialized:
-            self._app_logger.warning("应用已经初始化")
+            self._app_logger.info("应用已初始化")
             return True
+            
+        self._app_logger.info("正在初始化应用...")
         
         try:
-            self._app_logger.info("正在初始化应用...")
-            
-            # 添加关闭标志
-            self._shutting_down = False
-            
             # 加载配置
-            config_loaded = self._config.load_config()
-            if not config_loaded:
-                self._app_logger.error("加载配置失败，应用无法初始化")
+            try:
+                config_loaded = self._config.load_config()
+                if not config_loaded:
+                    self._app_logger.error("加载配置失败，应用无法初始化")
+                    # 但仍然继续初始化其他组件，设置配置有效性标志
+                    self._config_valid = False
+                else:
+                    self._config_valid = True
+            except Exception as e:
+                self._app_logger.error(f"加载配置时出错: {str(e)}")
+                self._config_valid = False
+            
+            # 初始化JSON存储
+            try:
+                self._json_storage = JsonStorage(config=self._config)
+                await self._json_storage.initialize()
+            except Exception as e:
+                self._app_logger.error(f"初始化JSON存储失败: {str(e)}")
+                if not self._json_storage:
+                    self._json_storage = None
+            
+            # 初始化历史跟踪器
+            try:
+                self._history_tracker = HistoryTracker(self._config, self._json_storage)
+                await self._history_tracker.initialize()
+            except Exception as e:
+                self._app_logger.error(f"初始化历史跟踪器失败: {str(e)}")
+                if not self._history_tracker:
+                    self._history_tracker = None
+            
+            # 初始化日志系统
+            try:
+                self._logger = Logger()
+                log_config = self._config.get("log", {})
+                log_file = log_config.get("file", "logs/tg_forwarder.log")
+                log_level = log_config.get("level", "INFO")
+                log_rotation = log_config.get("rotation", "10 MB")
+                self._logger.initialize(log_file=log_file, log_level=log_level, rotation=log_rotation)
+            except Exception as e:
+                self._app_logger.error(f"初始化日志系统失败: {str(e)}")
+                if not self._logger:
+                    self._logger = None
+            
+            # 初始化旧存储系统（后续将移除）
+            try:
+                self._storage = self._json_storage
+                self._app_logger.info("使用JsonStorage作为存储系统")
+            except Exception as e:
+                self._app_logger.error(f"初始化存储系统失败: {str(e)}")
                 return False
-            
-            # 初始化日志记录器
-            log_config = self._config.get("log") or {}
-            log_file = log_config.get("file", "logs/tg_forwarder.log")
-            log_level = log_config.get("level", "INFO")
-            log_rotation = log_config.get("rotation", "10 MB")
-            
-            self._logger.initialize(log_file, log_level, log_rotation)
-            
-            # 初始化存储
-            storage_config = self._config.get("storage") or {}
-            db_path = storage_config.get("db_path", "data/tg_forwarder.db")
-            self._storage = Storage(db_path)
-            await self._storage.initialize()
             
             # 初始化状态追踪器
             self._status_tracker = StatusTracker(self._storage, self._logger)
             await self._status_tracker.initialize()
             
-            # 初始化任务管理器
-            task_manager_config = self._config.get("task_manager") or {}
-            max_workers = task_manager_config.get("max_workers", 5)
-            self._task_manager = TaskManager(self._logger)
-            self._task_manager.initialize(max_workers)
-            
-            # 初始化Telegram客户端
-            self._client = TelegramClient(self._config, self._logger)
+            # 通过配置初始化Telegram客户端
+            try:
+                if self._config_valid:
+                    api_id = self._config.get_telegram_api_id()
+                    api_hash = self._config.get_telegram_api_hash()
+                    session_name = self._config.get_session_name()
+                    
+                    # 初始化客户端
+                    self._client = TelegramClient(
+                        api_id,
+                        api_hash,
+                        session_name,
+                        self._logger,
+                        self._config
+                    )
+                    
+                    # 连接客户端
+                    if not await self._client.connect():
+                        self._app_logger.error("Telegram客户端连接失败")
+                        return False
+                        
+                    # 添加客户端到全局引用
+                    Application._global_client = self._client
+                else:
+                    # 如果配置无效，不初始化客户端
+                    self._app_logger.warning("由于配置无效，跳过Telegram客户端初始化")
+                    self._client = None
+            except Exception as e:
+                self._app_logger.error(f"初始化Telegram客户端失败: {str(e)}", exc_info=True)
+                self._client = None
+                return False
             
             # 初始化下载器
-            download_config = self._config.get("download") or {}
-            self._downloader = Downloader(
-                self._client,
-                self._config,
-                self._logger,
-                self._storage,
-                self._status_tracker
-            )
-            await self._downloader.initialize()
-            
-            # 初始化上传器
-            upload_config = self._config.get("upload") or {}
-            self._uploader = Uploader(
-                self._client,
-                self._config,
-                self._logger,
-                self._storage,
-                self._status_tracker
-            )
-            await self._uploader.initialize()
-            
-            # 初始化转发器
-            self._forwarder = Forwarder(
-                self._client,
-                self._downloader,
-                self._uploader,
-                self._status_tracker,
-                self._task_manager,
-                self._config,
-                self._logger
-            )
-            await self._forwarder.initialize()
+            if self._client:
+                self._downloader = Downloader(
+                    self._client,
+                    self._config,
+                    self._logger,
+                    self._storage,
+                    self._status_tracker
+                )
+                await self._downloader.initialize()
+                
+                # 初始化上传器
+                upload_config = self._config.get("upload") or {}
+                self._uploader = Uploader(
+                    self._client,
+                    self._config,
+                    self._logger,
+                    self._storage,
+                    self._status_tracker
+                )
+                await self._uploader.initialize()
+                
+                # 初始化转发器，移除对task_manager的依赖
+                self._forwarder = Forwarder(
+                    self._client,
+                    self._downloader,
+                    self._uploader,
+                    self._status_tracker,
+                    self._config,
+                    self._logger
+                )
+                await self._forwarder.initialize()
+            else:
+                self._app_logger.warning("由于Telegram客户端未初始化，跳过下载器、上传器和转发器初始化")
+                self._downloader = None
+                self._uploader = None
+                self._forwarder = None
             
             # 注册信号处理器
             self._register_signal_handlers()
@@ -251,9 +336,10 @@ class Application(ApplicationInterface):
                     (self._uploader, "shutdown", "上传器"),
                     (self._downloader, "shutdown", "下载器"),
                     (self._client, "disconnect", "客户端"),
-                    (self._task_manager, "shutdown", "任务管理器"),
                     (self._status_tracker, "shutdown", "状态追踪器"),
-                    (self._storage, "close", "存储")
+                    (self._storage, "close", "存储"),
+                    (self._history_tracker, "close", "历史记录跟踪器"),
+                    (self._json_storage, "close", "JSON存储")
                 ]
                 
                 for component, method_name, component_name in components_to_close:
@@ -261,14 +347,7 @@ class Application(ApplicationInterface):
                         try:
                             close_method = getattr(component, method_name, None)
                             if close_method is not None and callable(close_method):
-                                # 特殊处理任务管理器的关闭，因为它不是异步方法
-                                if component is self._task_manager and method_name == "shutdown":
-                                    close_method(wait=True)
-                                else:
-                                    result = close_method()
-                                    
-                                    if asyncio.iscoroutine(result):
-                                        await result
+                                close_method()
                                 self._app_logger.debug(f"{component_name}已关闭")
                         except Exception as component_error:
                             self._app_logger.error(f"关闭{component_name}时出错: {str(component_error)}")
@@ -290,41 +369,49 @@ class Application(ApplicationInterface):
         
         self._app_logger.info("正在关闭应用...")
         
+        # 标记正在关闭
+        self._shutting_down = True
+        
         # 触发关闭事件
         await self._trigger_event("app_shutdown", {})
         
         # 停止转发服务
-        if self._running:
+        if self._forwarder and await self._forwarder.get_forwarding_status():
             await self.stop_forwarding()
         
         # 按顺序关闭组件
-        if self._forwarder:
-            await self._forwarder.shutdown()
+        components_to_close = [
+            (self._forwarder, "shutdown", "转发器"),
+            (self._uploader, "shutdown", "上传器"),
+            (self._downloader, "shutdown", "下载器"),
+            (self._client, "disconnect", "客户端"),
+            (self._status_tracker, "shutdown", "状态追踪器"),
+            (self._storage, "close", "存储"),
+            (self._history_tracker, "close", "历史记录跟踪器"),
+            (self._json_storage, "close", "JSON存储")
+        ]
         
-        if self._uploader:
-            await self._uploader.shutdown()
+        for component, method_name, component_name in components_to_close:
+            if component is not None:
+                try:
+                    self._app_logger.debug(f"正在关闭{component_name}...")
+                    close_method = getattr(component, method_name, None)
+                    if close_method is not None and callable(close_method):
+                        close_method()
+                    self._app_logger.debug(f"{component_name}已关闭")
+                except Exception as e:
+                    self._app_logger.error(f"关闭{component_name}时出错: {str(e)}")
         
-        if self._downloader:
-            await self._downloader.shutdown()
-        
-        if self._client:
-            await self._client.disconnect()
-        
-        if self._task_manager:
-            # TaskManager.shutdown 不是异步方法，不需要await
-            self._task_manager.shutdown(wait=True)
-        
-        if self._status_tracker:
-            self._status_tracker.shutdown()
-        
-        if self._storage:
-            await self._storage.close()
+        # 清空事件处理器
+        self._event_handlers.clear()
         
         # 关闭日志记录器
-        self._logger.shutdown()
+        if self._logger:
+            self._logger.shutdown()
         
+        # 标记为未初始化
         self._initialized = False
-        self._app_logger.info("应用已关闭")
+        self._app_logger.info("应用已成功关闭")
     
     def get_client(self) -> TelegramClientInterface:
         """
@@ -380,23 +467,35 @@ class Application(ApplicationInterface):
         """
         return self._status_tracker
     
-    def get_task_manager(self) -> TaskManagerInterface:
-        """
-        获取任务管理器实例
-        
-        Returns:
-            TaskManagerInterface: 任务管理器接口实例
-        """
-        return self._task_manager
-    
     def get_storage(self) -> StorageInterface:
         """
-        获取存储实例
+        获取存储实例（已弃用）
         
         Returns:
             StorageInterface: 存储接口实例
+            
+        Deprecated:
+            该方法已弃用，将在未来版本中移除。请使用 get_json_storage() 和 get_history_tracker() 方法代替。
         """
         return self._storage
+    
+    def get_json_storage(self) -> JsonStorageInterface:
+        """
+        获取JSON存储实例
+        
+        Returns:
+            JsonStorageInterface: JSON存储接口实例
+        """
+        return self._json_storage
+    
+    def get_history_tracker(self) -> HistoryTrackerInterface:
+        """
+        获取历史记录跟踪器实例
+        
+        Returns:
+            HistoryTrackerInterface: 历史记录跟踪器接口实例
+        """
+        return self._history_tracker
     
     def get_logger(self) -> LoggerInterface:
         """
@@ -414,61 +513,28 @@ class Application(ApplicationInterface):
         Returns:
             bool: 启动是否成功
         """
+        self._app_logger.info("启动消息转发服务")
+        
         if not self._initialized:
-            self._app_logger.error("应用未初始化，无法启动转发服务")
+            await self.initialize()
+        
+        # 获取转发配置
+        forward_config = self._config.get_forward_config()
+        
+        # 在配置中验证必要的参数
+        channel_pairs = forward_config.get("channel_pairs", {})
+        if not channel_pairs:
+            self._app_logger.error("未配置有效的频道对")
             return False
         
-        if self._running:
-            self._app_logger.warning("转发服务已经在运行")
+        # 启动转发服务
+        result = await self._forwarder.start_forwarding(forward_config, False)
+        
+        if result.get("success", False):
+            self._app_logger.info("消息转发服务已启动")
             return True
-        
-        try:
-            self._app_logger.info("正在启动转发服务...")
-            
-            # 确保客户端已连接
-            await self._client.connect()
-            
-            # 获取源频道和目标频道
-            source_channels = self._config.get_source_channels()
-            target_channels = self._config.get_target_channels()
-            
-            if not source_channels:
-                self._app_logger.error("未配置源频道，无法启动转发服务")
-                return False
-            
-            if not target_channels:
-                self._app_logger.error("未配置目标频道，无法启动转发服务")
-                return False
-            
-            # 获取转发配置
-            forward_config = self._config.get_value("forward") or {}
-            caption_template = forward_config.get("caption_template")
-            remove_captions = forward_config.get("remove_captions", False)
-            download_media = forward_config.get("download_media", True)
-            
-            # 启动转发
-            result = self._forwarder.start_forwarding(
-                source_channels,
-                target_channels,
-                caption_template=caption_template,
-                remove_captions=remove_captions,
-                download_media=download_media
-            )
-            
-            if result["success"]:
-                self._running = True
-                self._app_logger.info("转发服务已启动")
-                
-                # 触发事件
-                await self._trigger_event("forwarding_started", result)
-                
-                return True
-            else:
-                self._app_logger.error(f"启动转发服务失败: {result.get('error')}")
-                return False
-        
-        except Exception as e:
-            self._app_logger.error(f"启动转发服务时出错: {str(e)}", exc_info=True)
+        else:
+            self._app_logger.error(f"启动消息转发服务失败: {result.get('error', '未知错误')}")
             return False
     
     async def stop_forwarding(self) -> bool:
@@ -489,7 +555,7 @@ class Application(ApplicationInterface):
         try:
             self._app_logger.info("正在停止转发服务...")
             
-            result = self._forwarder.stop_forwarding()
+            result = await self._forwarder.stop_forwarding()
             
             if result["success"]:
                 self._running = False
@@ -524,7 +590,7 @@ class Application(ApplicationInterface):
         # 定义所有可重启的组件
         all_components = [
             "client", "downloader", "uploader", "forwarder",
-            "task_manager", "status_tracker", "storage"
+            "status_tracker", "storage"
         ]
         
         # 如果未指定组件，重启所有组件
@@ -574,11 +640,6 @@ class Application(ApplicationInterface):
                 elif component_name == "status_tracker":
                     await self._status_tracker.initialize()
                 
-                elif component_name == "task_manager":
-                    task_config = self._config.get_value("task_manager") or {}
-                    max_workers = task_config.get("max_workers", 10)
-                    await self._task_manager.initialize(max_workers)
-                
                 elif component_name == "downloader":
                     await self._downloader.initialize()
                 
@@ -623,14 +684,6 @@ class Application(ApplicationInterface):
                     "connected": self._client.is_connected() if hasattr(self._client, "is_connected") else False
                 }
             
-            if self._task_manager:
-                all_tasks = self._task_manager.get_all_tasks()
-                status["task_manager"] = {
-                    "total_tasks": len(all_tasks),
-                    "active_tasks": len(self._task_manager.get_active_tasks()),
-                    "queues": self._task_manager.get_queue_info() if hasattr(self._task_manager, "get_queue_info") else {}
-                }
-            
             if self._forwarder:
                 status["forwarder"] = self._forwarder.get_forwarding_status()
         
@@ -644,165 +697,6 @@ class Application(ApplicationInterface):
             str: 版本号
         """
         return self.VERSION
-    
-    async def backup_data(self, backup_path: Optional[str] = None) -> Dict[str, Any]:
-        """
-        备份应用数据
-        
-        Args:
-            backup_path: 备份路径，为None时使用默认路径
-            
-        Returns:
-            Dict[str, Any]: 备份结果
-        """
-        if not self._initialized:
-            self._app_logger.error("应用未初始化，无法备份数据")
-            return {"success": False, "error": "应用未初始化"}
-        
-        try:
-            # 使用默认备份路径
-            if backup_path is None:
-                backup_config = self._config.get_value("backup") or {}
-                backup_dir = backup_config.get("directory", "backups")
-                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                backup_path = os.path.join(backup_dir, f"tg_forwarder_backup_{timestamp}")
-            
-            # 确保备份目录存在
-            os.makedirs(os.path.dirname(backup_path), exist_ok=True)
-            
-            self._app_logger.info(f"开始备份数据到: {backup_path}")
-            
-            # 备份配置文件
-            config_backup = os.path.join(backup_path, "config")
-            os.makedirs(config_backup, exist_ok=True)
-            config_data = self._config.export()
-            with open(os.path.join(config_backup, "config.json"), "w") as f:
-                json.dump(config_data, f, indent=2)
-            
-            # 备份数据库
-            db_backup = await self._storage.backup(os.path.join(backup_path, "database"))
-            
-            # 备份下载的媒体文件（如果配置了）
-            backup_config = self._config.get_value("backup") or {}
-            include_media = backup_config.get("include_media", False)
-            
-            if include_media and self._downloader:
-                download_dir = self._downloader.get_download_directory()
-                if os.path.exists(download_dir):
-                    media_backup = os.path.join(backup_path, "media")
-                    shutil.copytree(download_dir, media_backup)
-            
-            result = {
-                "success": True,
-                "backup_path": backup_path,
-                "timestamp": datetime.now().isoformat(),
-                "components": {
-                    "config": True,
-                    "database": db_backup["success"],
-                    "media": include_media
-                }
-            }
-            
-            # 触发事件
-            await self._trigger_event("data_backed_up", result)
-            
-            self._app_logger.info(f"数据备份完成: {backup_path}")
-            return result
-        
-        except Exception as e:
-            self._app_logger.error(f"备份数据时出错: {str(e)}", exc_info=True)
-            return {"success": False, "error": str(e)}
-    
-    async def restore_data(self, backup_path: str) -> Dict[str, Any]:
-        """
-        恢复应用数据
-        
-        Args:
-            backup_path: 备份路径
-            
-        Returns:
-            Dict[str, Any]: 恢复结果
-        """
-        if not os.path.exists(backup_path):
-            return {"success": False, "error": f"备份路径不存在: {backup_path}"}
-        
-        was_initialized = self._initialized
-        was_running = self._running
-        
-        try:
-            # 如果应用已初始化，先关闭它
-            if was_initialized:
-                if was_running:
-                    await self.stop_forwarding()
-                await self.shutdown()
-            
-            self._app_logger.info(f"开始从 {backup_path} 恢复数据")
-            
-            # 恢复配置文件
-            config_file = os.path.join(backup_path, "config", "config.json")
-            if os.path.exists(config_file):
-                with open(config_file, "r") as f:
-                    config_data = json.load(f)
-                self._config = ConfigManager()
-                self._config.import_data(config_data)
-                self._config.save()
-            
-            # 初始化应用（会创建新的组件实例）
-            await self.initialize()
-            
-            # 恢复数据库
-            db_backup = os.path.join(backup_path, "database")
-            if os.path.exists(db_backup):
-                db_result = await self._storage.restore(db_backup)
-            else:
-                db_result = {"success": False, "error": "数据库备份不存在"}
-            
-            # 恢复媒体文件（如果存在）
-            media_backup = os.path.join(backup_path, "media")
-            media_result = {"success": False, "skipped": True}
-            
-            if os.path.exists(media_backup) and self._downloader:
-                download_dir = self._downloader.get_download_directory()
-                if os.path.exists(download_dir):
-                    shutil.rmtree(download_dir)
-                shutil.copytree(media_backup, download_dir)
-                media_result = {"success": True, "skipped": False}
-            
-            # 如果之前在运行，重新启动转发服务
-            if was_running:
-                await self.start_forwarding()
-            
-            result = {
-                "success": db_result["success"],
-                "backup_path": backup_path,
-                "timestamp": datetime.now().isoformat(),
-                "components": {
-                    "config": True,
-                    "database": db_result,
-                    "media": media_result
-                }
-            }
-            
-            # 触发事件
-            await self._trigger_event("data_restored", result)
-            
-            self._app_logger.info(f"数据恢复完成: {backup_path}")
-            return result
-        
-        except Exception as e:
-            self._app_logger.error(f"恢复数据时出错: {str(e)}", exc_info=True)
-            
-            # 尝试重新初始化应用
-            try:
-                if not self._initialized:
-                    await self.initialize()
-                
-                if was_running and not self._running:
-                    await self.start_forwarding()
-            except:
-                pass
-            
-            return {"success": False, "error": str(e)}
     
     async def health_check(self) -> Dict[str, Any]:
         """
@@ -837,14 +731,6 @@ class Application(ApplicationInterface):
             health["components"]["storage"] = {
                 "status": "operational" if storage_healthy else "error",
                 "healthy": storage_healthy
-            }
-            
-            # 检查任务管理器
-            task_manager_healthy = self._task_manager is not None
-            health["components"]["task_manager"] = {
-                "status": "operational" if task_manager_healthy else "error",
-                "healthy": task_manager_healthy,
-                "active_tasks": len(self._task_manager.get_active_tasks()) if task_manager_healthy else 0
             }
             
             # 检查转发器
@@ -1049,13 +935,264 @@ class Application(ApplicationInterface):
         Returns:
             bool: 存储是否正常
         """
-        if not self._storage:
+        # 检查旧存储
+        if self._storage:
+            try:
+                # 尝试执行简单查询测试
+                test_result = await self._storage.query("test")
+            except Exception as e:
+                self._app_logger.warning(f"旧存储检查失败: {e}")
+                # 即使旧存储检查失败，我们仍可能有新存储可用
+        
+        # 检查JSON存储
+        if not self._json_storage:
+            self._app_logger.error("JSON存储组件未初始化")
             return False
         
         try:
-            # 尝试执行简单查询测试
-            test_result = await self._storage.query("test")
+            # 验证JSON存储结构
+            if not await self._json_storage.validate_history_structure():
+                self._app_logger.error("JSON存储结构验证失败")
+                return False
+            
+            # 检查历史跟踪器
+            if not self._history_tracker:
+                self._app_logger.error("历史跟踪器未初始化")
+                return False
+            
+            # 尝试导出数据验证历史跟踪器状态
+            history_data = self._history_tracker.export_history_data()
+            if history_data is None:
+                self._app_logger.error("历史跟踪器数据导出失败")
+                return False
+            
             return True
         except Exception as e:
             self._app_logger.error(f"存储检查失败: {e}")
-            return False 
+            return False
+    
+    async def upload_files(self, upload_config: Dict[str, Any] = None) -> Dict[str, Any]:
+        """
+        上传本地文件到目标频道
+        
+        Args:
+            upload_config: 上传配置，为None时使用默认配置
+            
+        Returns:
+            Dict[str, Any]: 上传结果
+        """
+        self._app_logger.info("开始上传本地文件")
+        
+        if not self._initialized:
+            await self.initialize()
+        
+        if not upload_config:
+            upload_config = self._config.get_upload_config()
+        
+        return await self._uploader.upload_files(upload_config)
+    
+    async def start_monitor(self, monitor_config: Dict[str, Any] = None) -> Dict[str, Any]:
+        """
+        启动监听服务，实时监听源频道的新消息并转发到目标频道
+        
+        Args:
+            monitor_config: 监听配置，为None时使用默认配置。配置应包含：
+                - channel_pairs: 源频道与目标频道的映射关系
+                - duration: 监听时长，格式为"年-月-日-时"，如"2025-3-28-1"
+                - remove_captions: 是否移除原始字幕
+                - media_types: 要转发的媒体类型列表
+                - forward_delay: 转发延迟（秒）
+                - max_retries: 失败后最大重试次数
+                - message_filter: 消息过滤器表达式
+            
+        Returns:
+            Dict[str, Any]: 启动结果，包含以下字段：
+                - success: 是否成功启动
+                - error: 如果失败，包含错误信息
+                - monitor_id: 监听任务ID
+                - start_time: 开始时间
+                - end_time: 预计结束时间（根据duration计算）
+        """
+        self._app_logger.info("开始启动监听服务")
+        
+        # 确保应用已初始化
+        if not self._initialized:
+            await self.initialize()
+        
+        # 如果没有提供配置，使用默认配置
+        if monitor_config is None:
+            monitor_config = self._config.get_monitor_config()
+            self._app_logger.info(f"使用默认监听配置: {monitor_config}")
+        
+        # 验证频道对配置
+        channel_pairs = monitor_config.get("channel_pairs", {})
+        if not channel_pairs:
+            error_msg = "监听配置中缺少有效的频道对"
+            self._app_logger.error(error_msg)
+            return {
+                "success": False,
+                "error": error_msg
+            }
+        
+        # 确保频道对格式正确
+        try:
+            for source, targets in channel_pairs.items():
+                if not isinstance(source, (str, int)):
+                    raise ValueError(f"源频道格式不正确: {source}")
+                if not isinstance(targets, list):
+                    raise ValueError(f"目标频道必须是列表: {targets}")
+                if not targets:
+                    raise ValueError(f"源频道 {source} 没有指定目标频道")
+        except ValueError as e:
+            error_msg = f"监听配置验证失败: {str(e)}"
+            self._app_logger.error(error_msg)
+            return {
+                "success": False,
+                "error": error_msg
+            }
+        
+        # 启动监听
+        try:
+            result = await self._forwarder.start_monitor(monitor_config)
+            
+            # 如果启动成功，记录监听状态
+            if result.get("success", False):
+                self._app_logger.info(f"监听服务启动成功: {result.get('monitor_id', '')}")
+                self._monitor_status = {
+                    "running": True,
+                    "start_time": datetime.now(),
+                    "monitor_id": result.get("monitor_id", ""),
+                    "config": monitor_config
+                }
+            else:
+                self._app_logger.error(f"监听服务启动失败: {result.get('error', '未知错误')}")
+            
+            return result
+        except Exception as e:
+            error_msg = f"启动监听服务出错: {str(e)}"
+            self._app_logger.error(error_msg, exc_info=True)
+            return {
+                "success": False,
+                "error": error_msg
+            }
+    
+    async def stop_monitor(self) -> Dict[str, Any]:
+        """
+        停止监听服务
+        
+        Returns:
+            Dict[str, Any]: 停止结果，包含以下字段：
+                - success: 是否成功停止
+                - error: 如果失败，包含错误信息
+                - monitor_id: 监听任务ID
+                - duration: 实际监听时长（秒）
+                - messages_forwarded: 已转发的消息数量
+        """
+        self._app_logger.info("开始停止监听服务")
+        
+        # 检查监听服务是否在运行
+        if not hasattr(self, '_monitor_status') or not self._monitor_status or not self._monitor_status.get("running", False):
+            error_msg = "监听服务未在运行"
+            self._app_logger.warning(error_msg)
+            return {
+                "success": False,
+                "error": error_msg
+            }
+        
+        # 停止监听
+        try:
+            result = await self._forwarder.stop_monitor()
+            
+            # 如果停止成功，更新监听状态
+            if result.get("success", False):
+                self._app_logger.info(f"监听服务已停止: {result.get('monitor_id', '')}")
+                
+                # 计算持续时间
+                if "start_time" in self._monitor_status:
+                    duration = (datetime.now() - self._monitor_status["start_time"]).total_seconds()
+                    result["duration"] = duration
+                
+                # 重置监听状态
+                self._monitor_status = {
+                    "running": False,
+                    "end_time": datetime.now(),
+                    "last_monitor_id": self._monitor_status.get("monitor_id", ""),
+                    "last_duration": result.get("duration", 0),
+                    "messages_forwarded": result.get("messages_forwarded", 0)
+                }
+            else:
+                self._app_logger.error(f"停止监听服务失败: {result.get('error', '未知错误')}")
+            
+            return result
+        except Exception as e:
+            error_msg = f"停止监听服务出错: {str(e)}"
+            self._app_logger.error(error_msg, exc_info=True)
+            return {
+                "success": False,
+                "error": error_msg
+            }
+    
+    def get_monitor_status(self) -> Dict[str, Any]:
+        """
+        获取监听服务状态
+        
+        Returns:
+            Dict[str, Any]: 监听服务状态信息，包含以下字段：
+                - running: 是否正在运行
+                - start_time: 开始时间
+                - end_time: 预计结束时间
+                - remaining_time: 剩余时间（秒）
+                - messages_forwarded: 已转发的消息数量
+                - channel_pairs: 监听的频道对
+                - errors: 错误统计
+        """
+        # 如果应用未初始化或监听状态不存在，返回未运行状态
+        if not self._initialized or not hasattr(self, '_monitor_status') or not self._monitor_status:
+            return {
+                "running": False,
+                "message": "监听服务未初始化或未运行过"
+            }
+        
+        # 获取转发器中的实时状态
+        forwarder_status = self._forwarder.get_monitor_status()
+        
+        # 合并应用层和转发器层的状态
+        status = {
+            **self._monitor_status,
+            **forwarder_status
+        }
+        
+        # 确保基本字段存在
+        status["running"] = status.get("running", False)
+        
+        # 格式化时间
+        if "start_time" in status and not isinstance(status["start_time"], str):
+            status["start_time"] = status["start_time"].isoformat()
+        if "end_time" in status and not isinstance(status["end_time"], str):
+            status["end_time"] = status["end_time"].isoformat()
+        
+        return status
+    
+    async def download_messages(self, download_config: Dict[str, Any] = None) -> Dict[str, Any]:
+        """
+        下载消息和媒体
+        
+        Args:
+            download_config: 下载配置，为None时使用默认配置
+            
+        Returns:
+            Dict[str, Any]: 下载结果
+        """
+        self._app_logger.info("开始下载消息")
+        
+        if not self._initialized:
+            await self.initialize()
+        
+        if not download_config:
+            download_config = self._config.get_download_config()
+        
+        return await self._downloader.download_messages(download_config)
+    
+    async def register_channel(self, channel_identifier: Union[str, int]) -> Dict[str, Any]:
+        # ... existing code ...
+        pass 

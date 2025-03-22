@@ -1,6 +1,9 @@
 """
 存储接口抽象
 定义了数据持久化的必要方法
+
+@deprecated: 此接口将在未来版本中被移除。请使用JsonStorageInterface和HistoryTrackerInterface替代。
+此接口中的数据库风格方法不符合项目存储需求，项目使用JSON文件存储历史记录，不使用数据库。
 """
 
 from abc import ABC, abstractmethod
@@ -13,6 +16,9 @@ class StorageInterface(ABC):
     """
     存储接口，定义了数据持久化的必要方法
     所有存储实现都应该继承此接口
+    
+    @deprecated: 此接口将在未来版本中被移除。请使用JsonStorageInterface和HistoryTrackerInterface替代。
+    此接口中的数据库风格方法不符合项目存储需求，项目使用JSON文件存储历史记录，不使用数据库。
     """
     
     @abstractmethod
@@ -138,27 +144,11 @@ class StorageInterface(ABC):
         pass
     
     @abstractmethod
-    def backup(self, backup_path: str) -> bool:
+    def get_temp_directory(self) -> str:
         """
-        备份数据
+        获取临时文件存储目录
         
-        Args:
-            backup_path: 备份路径
-            
         Returns:
-            bool: 备份是否成功
-        """
-        pass
-    
-    @abstractmethod
-    def restore(self, backup_path: str) -> bool:
-        """
-        恢复数据
-        
-        Args:
-            backup_path: 备份路径
-            
-        Returns:
-            bool: 恢复是否成功
+            str: 临时文件目录路径
         """
         pass 

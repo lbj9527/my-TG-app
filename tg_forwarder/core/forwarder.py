@@ -14,7 +14,6 @@ from tg_forwarder.interfaces.downloader_interface import DownloaderInterface
 from tg_forwarder.interfaces.uploader_interface import UploaderInterface
 from tg_forwarder.interfaces.status_tracker_interface import StatusTrackerInterface
 from tg_forwarder.interfaces.logger_interface import LoggerInterface
-from tg_forwarder.interfaces.task_manager_interface import TaskManagerInterface
 from tg_forwarder.interfaces.config_interface import ConfigInterface
 
 
@@ -30,7 +29,6 @@ class Forwarder(ForwarderInterface):
         downloader: DownloaderInterface,
         uploader: UploaderInterface,
         status_tracker: StatusTrackerInterface,
-        task_manager: TaskManagerInterface,
         config: ConfigInterface,
         logger: LoggerInterface
     ):
@@ -42,7 +40,6 @@ class Forwarder(ForwarderInterface):
             downloader: 下载器接口实例
             uploader: 上传器接口实例
             status_tracker: 状态追踪器接口实例
-            task_manager: 任务管理器接口实例
             config: 配置接口实例
             logger: 日志接口实例
         """
@@ -50,14 +47,28 @@ class Forwarder(ForwarderInterface):
         self._downloader = downloader
         self._uploader = uploader
         self._status_tracker = status_tracker
-        self._task_manager = task_manager
         self._config = config
         self._logger = logger.get_logger("Forwarder")
         
         self._initialized = False
         self._running = False
-        self._tasks = {}  # 正在进行的转发任务
-        self._scheduled_tasks = {}  # 计划任务
+        self._tasks = {}  # 存储任务对象(asyncio.Task)和任务信息的字典
+        self._scheduled_tasks = {}  # 计划任务信息
+        self._forward_config = {}  # 当前的转发配置
+        self._source_channels = []  # 当前监听的源频道
+        self._target_channels = []  # 当前的目标频道
+        self._forward_interval = 60  # 默认转发检查间隔（秒）
+        self._forward_task = None  # 转发任务
+        
+        # 监听相关成员变量
+        self._monitor_running = False  # 监听服务是否在运行
+        self._monitor_config = {}  # 监听配置
+        self._monitor_start_time = None  # 监听开始时间
+        self._monitor_end_time = None  # 监听结束时间
+        self._monitor_id = None  # 监听任务ID
+        self._monitor_source_channels = []  # 监听的源频道
+        self._monitor_forwarded_count = 0  # 已转发消息数量
+        self._monitor_errors = {}  # 错误统计
     
     async def initialize(self) -> bool:
         """
@@ -213,10 +224,19 @@ class Forwarder(ForwarderInterface):
             if not media_group:
                 return {"success": False, "error": "获取媒体组失败或该消息不属于媒体组"}
             
+            # 按消息ID排序媒体组中的消息
+            media_group.sort(key=lambda msg: msg.id)
             media_ids = [msg.id for msg in media_group]
-            self._logger.info(f"找到媒体组，共 {len(media_ids)} 条消息: {media_ids}")
             
-            results = {"success": True, "targets": {}, "source_channel": source_channel, "media_group_ids": media_ids}
+            self._logger.info(f"找到媒体组，共 {len(media_ids)} 条消息: {media_ids}（已按ID排序）")
+            
+            results = {
+                "success": True, 
+                "targets": {}, 
+                "source_channel": source_channel, 
+                "media_group_ids": media_ids,
+                "media_group_id": media_group[0].media_group_id if media_group else None
+            }
             
             for target in target_channels:
                 try:
@@ -317,9 +337,30 @@ class Forwarder(ForwarderInterface):
                 end_id
             )
             
-            valid_message_ids = [msg.id for msg in messages if msg is not None]
+            if not messages:
+                return {"success": False, "error": "指定范围内没有有效消息"}
+            
+            # 按媒体组分类消息
+            message_groups = {}
+            single_messages = []
+            
+            # 1. 收集并整理媒体组
+            for msg in messages:
+                if msg is None:
+                    continue
+                    
+                if msg.media_group_id:
+                    if msg.media_group_id not in message_groups:
+                        message_groups[msg.media_group_id] = []
+                    message_groups[msg.media_group_id].append(msg)
+                else:
+                    single_messages.append(msg)
+            
+            valid_message_ids = [msg.id for msg in single_messages]
+            valid_message_ids.extend([msg.id for group in message_groups.values() for msg in group])
             
             self._logger.info(f"在范围 {start_id}-{end_id} 中找到 {len(valid_message_ids)}/{total_messages} 条有效消息")
+            self._logger.info(f"其中包含 {len(message_groups)} 个媒体组和 {len(single_messages)} 条单独消息")
             
             if not valid_message_ids:
                 return {"success": False, "error": "指定范围内没有有效消息"}
@@ -333,6 +374,19 @@ class Forwarder(ForwarderInterface):
                 "targets": {}
             }
             
+            # 初始化每个目标的结果
+            for target in target_channels:
+                results["targets"][target] = {
+                    "success": True,
+                    "total": len(valid_message_ids),
+                    "succeeded": 0,
+                    "failed": 0,
+                    "results": []
+                }
+            
+            # 2. 按媒体组ID排序（确保媒体组有序处理）
+            sorted_media_groups = sorted(message_groups.keys())
+            
             for target in target_channels:
                 try:
                     # 获取配置中此目标的转发配置
@@ -345,11 +399,12 @@ class Forwarder(ForwarderInterface):
                     target_results = []
                     failed_count = 0
                     
-                    for msg_id in valid_message_ids:
+                    # 3. 首先转发所有单独消息
+                    for msg in single_messages:
                         result = await self._forward_single_message(
                             source_channel, 
                             target, 
-                            msg_id,
+                            msg.id,
                             caption_template,
                             remove_captions,
                             download_media
@@ -359,20 +414,50 @@ class Forwarder(ForwarderInterface):
                         
                         if not result["success"]:
                             failed_count += 1
-                            self._logger.warning(f"转发消息 {msg_id} 到 {target} 失败: {result.get('error')}")
+                            self._logger.warning(f"转发消息 {msg.id} 到 {target} 失败: {result.get('error')}")
+                        else:
+                            results["targets"][target]["succeeded"] += 1
                         
                         # 添加延迟以避免API限制
                         await asyncio.sleep(delay)
                     
-                    results["targets"][target] = {
-                        "success": failed_count < len(valid_message_ids),
-                        "total": len(valid_message_ids),
-                        "succeeded": len(valid_message_ids) - failed_count,
-                        "failed": failed_count,
-                        "results": target_results
-                    }
+                    # 4. 然后按顺序处理每个媒体组（确保媒体组整体转发）
+                    for group_id in sorted_media_groups:
+                        group_messages = message_groups[group_id]
+                        
+                        # 确保媒体组内消息按ID排序
+                        group_messages.sort(key=lambda msg: msg.id)
+                        
+                        # 整体转发媒体组
+                        for msg in group_messages:
+                            result = await self._forward_single_message(
+                                source_channel, 
+                                target, 
+                                msg.id,
+                                caption_template,
+                                remove_captions,
+                                download_media
+                            )
+                            
+                            target_results.append(result)
+                            
+                            if not result["success"]:
+                                failed_count += 1
+                                self._logger.warning(f"转发媒体组消息 {msg.id} (组ID: {group_id}) 到 {target} 失败: {result.get('error')}")
+                            else:
+                                results["targets"][target]["succeeded"] += 1
+                            
+                            # 媒体组内消息间添加短暂延迟
+                            await asyncio.sleep(max(0.5, delay / 2))
+                        
+                        # 媒体组之间添加完整延迟，确保媒体组间串行处理
+                        await asyncio.sleep(delay)
+                    
+                    results["targets"][target]["failed"] = failed_count
+                    results["targets"][target]["results"] = target_results
                     
                     if failed_count == len(valid_message_ids):
+                        results["targets"][target]["success"] = False
                         results["success"] = False
                 
                 except Exception as e:
@@ -486,16 +571,22 @@ class Forwarder(ForwarderInterface):
         if delay_seconds < 0:
             raise Exception("调度时间不能早于当前时间")
         
-        # 创建调度任务
-        task_id = self._task_manager.submit_task(
-            "scheduled_forward",
-            self._scheduled_forward_task,
-            source_channel,
-            message_id,
-            target_channels,
-            _name=f"计划转发任务: {source_channel}",
-            _queue="scheduled"
-        )
+        # 使用uuid生成唯一任务ID
+        import uuid
+        task_id = str(uuid.uuid4())
+        
+        # 创建异步延迟任务
+        async def delayed_task():
+            # 等待直到计划时间
+            await asyncio.sleep(delay_seconds)
+            # 执行转发任务
+            return await self._scheduled_forward_task(source_channel, message_id, target_channels)
+        
+        # 创建异步任务
+        task = asyncio.create_task(delayed_task())
+        
+        # 记录任务信息
+        self._tasks[task_id] = task
         
         # 记录调度信息
         self._scheduled_tasks[task_id] = {
@@ -532,8 +623,20 @@ class Forwarder(ForwarderInterface):
             return False
         
         # 尝试取消任务
-        if self._task_manager.cancel_task(task_id):
+        if task_id in self._tasks and isinstance(self._tasks[task_id], asyncio.Task):
+            task = self._tasks[task_id]
+            if not task.done():
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+            
+            # 更新任务状态
             self._scheduled_tasks[task_id]["status"] = "cancelled"
+            # 从任务列表中移除
+            self._tasks.pop(task_id, None)
+            
             self._logger.info(f"已取消计划转发任务: {task_id}")
             return True
         else:
@@ -556,35 +659,57 @@ class Forwarder(ForwarderInterface):
         # 检查是否是调度任务
         if task_id in self._scheduled_tasks:
             scheduled_info = self._scheduled_tasks[task_id]
-            task_status = self._task_manager.get_task_status(task_id)
+            
+            # 检查任务是否在运行中
+            task_status = "unknown"
+            if task_id in self._tasks:
+                task = self._tasks[task_id]
+                if isinstance(task, asyncio.Task):
+                    if task.done():
+                        if task.cancelled():
+                            task_status = "cancelled"
+                        elif task.exception() is not None:
+                            task_status = "failed"
+                        else:
+                            task_status = "completed"
+                    else:
+                        task_status = "running"
             
             return {
                 **scheduled_info,
                 "task_type": "scheduled",
-                "task_status": task_status.get("status", "unknown")
+                "task_status": task_status
             }
         
         # 检查是否是常规转发任务
         if task_id in self._tasks:
-            forward_info = self._tasks[task_id]
-            task_status = self._task_manager.get_task_status(task_id)
+            task = self._tasks[task_id]
+            task_status = "unknown"
+            
+            if isinstance(task, asyncio.Task):
+                if task.done():
+                    if task.cancelled():
+                        task_status = "cancelled"
+                    elif task.exception() is not None:
+                        task_status = "failed"
+                    else:
+                        task_status = "completed"
+                else:
+                    task_status = "running"
             
             return {
-                **forward_info,
+                "task_id": task_id,
                 "task_type": "forward",
-                "task_status": task_status.get("status", "unknown")
+                "task_status": task_status,
+                "created_at": datetime.now().isoformat()
             }
         
-        # 直接从任务管理器获取状态
-        task_status = self._task_manager.get_task_status(task_id)
-        if "error" in task_status:
-            return {"error": f"找不到任务: {task_id}"}
-        
+        # 未找到任务
         return {
+            "error": f"找不到任务: {task_id}",
             "task_id": task_id,
             "task_type": "unknown",
-            "task_status": task_status.get("status", "unknown"),
-            "details": task_status
+            "task_status": "not_found"
         }
     
     async def get_forward_statistics(
@@ -722,7 +847,577 @@ class Forwarder(ForwarderInterface):
             self._logger.error(f"重试失败任务时出错: {str(e)}", exc_info=True)
             return {"success": False, "error": str(e)}
 
-      # 以下是内部辅助方法
+    async def start_forwarding(
+        self,
+        forward_config: Dict[str, Any] = None,
+        monitor_mode: bool = False
+    ) -> Dict[str, Any]:
+        """
+        启动转发服务
+        
+        Args:
+            forward_config: 转发配置，为None时使用默认配置
+            monitor_mode: 是否为监听模式，为True时使用monitor配置
+            
+        Returns:
+            Dict[str, Any]: 启动结果
+        """
+        if not self._initialized:
+            await self.initialize()
+        
+        # 如果没有提供配置，使用默认配置
+        if forward_config is None:
+            if monitor_mode:
+                forward_config = self._config.get_monitor_config()
+            else:
+                forward_config = self._config.get_forward_config()
+        
+        self._logger.info(f"启动转发服务，配置: {forward_config}, 监听模式: {monitor_mode}")
+        
+        try:
+            # 提取配置参数
+            channel_pairs = forward_config.get("channel_pairs", {})
+            if not channel_pairs:
+                return {"success": False, "error": "未提供有效的频道对配置"}
+            
+            # 提取源频道和目标频道
+            source_channels = list(channel_pairs.keys())
+            # 对于目标频道，使用第一个源频道的目标频道作为默认值
+            default_targets = channel_pairs.get(source_channels[0], []) if source_channels else []
+            target_channels = []
+            for targets in channel_pairs.values():
+                target_channels.extend(targets)
+            target_channels = list(set(target_channels))  # 去重
+            
+            # 提取其他参数
+            caption_template = forward_config.get("caption_template", "{original_caption}")
+            remove_captions = forward_config.get("remove_captions", False)
+            download_media = forward_config.get("download_media", True)
+            
+            self._logger.info(f"启动转发服务，监控源频道: {source_channels}")
+            
+            # 保存转发配置
+            self._source_channels = source_channels
+            self._target_channels = target_channels
+            self._forward_config = forward_config
+            
+            # 获取配置中的转发间隔
+            self._forward_interval = forward_config.get("forward_delay", 2)
+            
+            # 创建转发任务，使用asyncio.create_task替代task_manager
+            method_to_run = self._forward_monitoring_task if not monitor_mode else self._message_monitoring_task
+            self._forward_task = asyncio.create_task(method_to_run())
+            
+            self._running = True
+            self._logger.info("转发服务已启动")
+            
+            return {
+                "success": True, 
+                "task_id": id(self._forward_task),
+                "source_channels": source_channels,
+                "target_channels": target_channels,
+                "config": self._forward_config
+            }
+        
+        except Exception as e:
+            self._logger.error(f"启动转发服务失败: {str(e)}", exc_info=True)
+            return {"success": False, "error": str(e)}
+    
+    async def stop_forwarding(self) -> Dict[str, Any]:
+        """
+        停止转发服务
+        
+        Returns:
+            Dict[str, Any]: 停止结果
+        """
+        if not self._running:
+            return {"success": False, "error": "转发服务未在运行"}
+        
+        try:
+            # 取消转发监控任务
+            if self._forward_task:
+                if not self._forward_task.done():
+                    self._forward_task.cancel()
+                    try:
+                        await self._forward_task
+                    except asyncio.CancelledError:
+                        pass
+                self._forward_task = None
+            
+            # 取消所有进行中的任务
+            for task_id, task in list(self._tasks.items()):
+                if isinstance(task, asyncio.Task) and not task.done():
+                    task.cancel()
+                    try:
+                        await task
+                    except asyncio.CancelledError:
+                        pass
+                self._tasks.pop(task_id, None)
+            
+            self._running = False
+            self._logger.info("转发服务已停止")
+            
+            return {"success": True}
+        
+        except Exception as e:
+            self._logger.error(f"停止转发服务失败: {str(e)}", exc_info=True)
+            return {"success": False, "error": str(e)}
+    
+    def get_forwarding_status(self) -> Dict[str, Any]:
+        """
+        获取转发服务状态
+        
+        Returns:
+            Dict[str, Any]: 转发服务状态信息
+        """
+        if not self._initialized:
+            return {"initialized": False, "running": False}
+        
+        status = {
+            "initialized": True,
+            "running": self._running,
+            "source_channels": self._source_channels.copy() if self._running else [],
+            "target_channels": self._target_channels.copy() if self._running else [],
+            "forward_interval": self._forward_interval,
+            "active_tasks": len(self._tasks),
+            "scheduled_tasks": len(self._scheduled_tasks),
+            "monitoring_task": self._forward_task,
+            "config": self._forward_config.copy() if self._running else {}
+        }
+        
+        return status
+    
+    async def start_monitor(
+        self,
+        monitor_config: Dict[str, Any] = None
+    ) -> Dict[str, Any]:
+        """
+        启动监听服务，实时监听源频道的新消息并转发到目标频道
+        
+        Args:
+            monitor_config: 监听配置，为None时使用默认配置。配置应包含：
+                - channel_pairs: 源频道与目标频道的映射关系
+                - duration: 监听时长，格式为"年-月-日-时"，如"2025-3-28-1"
+                - remove_captions: 是否移除原始字幕
+                - media_types: 要转发的媒体类型列表
+                - forward_delay: 转发延迟（秒）
+                - max_retries: 失败后最大重试次数
+                - message_filter: 消息过滤器表达式
+            
+        Returns:
+            Dict[str, Any]: 启动结果，包含以下字段：
+                - success: 是否成功启动
+                - error: 如果失败，包含错误信息
+                - monitor_id: 监听任务ID
+                - start_time: 开始时间
+                - end_time: 预计结束时间（根据duration计算）
+        """
+        # 检查是否已经在监听中
+        if self._running and self._forward_task:
+            self._logger.warning("监听服务已在运行中")
+            return {
+                "success": False,
+                "error": "监听服务已在运行中",
+                "monitor_id": str(self._forward_task)
+            }
+        
+        try:
+            # 如果没有提供配置，使用默认配置
+            if monitor_config is None:
+                monitor_config = self._config.get_monitor_config()
+            
+            # 从配置中提取必要的参数
+            channel_pairs = monitor_config.get("channel_pairs", {})
+            if not channel_pairs:
+                return {
+                    "success": False,
+                    "error": "未提供有效的频道对配置"
+                }
+            
+            # 提取源频道和目标频道
+            source_channels = list(channel_pairs.keys())
+            
+            # 验证监听持续时间
+            duration = monitor_config.get("duration", "2025-12-31-23")  # 默认到2025年底
+            
+            # 解析持续时间
+            try:
+                end_time = None
+                if duration:
+                    parts = duration.split("-")
+                    if len(parts) >= 4:
+                        year, month, day, hour = map(int, parts[:4])
+                        from datetime import datetime
+                        end_time = datetime(year, month, day, hour)
+                    else:
+                        self._logger.warning(f"无效的持续时间格式: {duration}，使用默认值")
+            except Exception as e:
+                self._logger.error(f"解析持续时间出错: {str(e)}")
+                return {
+                    "success": False,
+                    "error": f"解析持续时间出错: {str(e)}"
+                }
+            
+            # 初始化监听配置
+            self._monitor_running = True
+            self._monitor_config = monitor_config
+            self._monitor_start_time = datetime.now()
+            self._monitor_end_time = end_time
+            self._monitor_source_channels = source_channels
+            self._monitor_forwarded_count = 0
+            self._monitor_errors = {}
+            
+            # 生成唯一的监听ID
+            import uuid
+            monitor_id = str(uuid.uuid4())
+            self._monitor_id = monitor_id
+            
+            # 启动监听任务
+            self._forward_task = asyncio.create_task(self._message_monitoring_task())
+            
+            self._logger.info(f"监听服务已启动，监听ID: {monitor_id}")
+            
+            # 返回启动结果
+            return {
+                "success": True,
+                "monitor_id": monitor_id,
+                "start_time": self._monitor_start_time.isoformat(),
+                "end_time": self._monitor_end_time.isoformat() if self._monitor_end_time else None,
+                "channel_pairs": channel_pairs
+            }
+            
+        except Exception as e:
+            self._logger.error(f"启动监听服务失败: {str(e)}", exc_info=True)
+            return {
+                "success": False,
+                "error": f"启动监听服务失败: {str(e)}"
+            }
+    
+    async def stop_monitor(self) -> Dict[str, Any]:
+        """
+        停止监听服务
+        
+        Returns:
+            Dict[str, Any]: 停止结果，包含以下字段：
+                - success: 是否成功停止
+                - error: 如果失败，包含错误信息
+                - monitor_id: 监听任务ID
+                - duration: 实际监听时长（秒）
+                - messages_forwarded: 已转发的消息数量
+        """
+        if not self._monitor_running or not self._forward_task:
+            return {
+                "success": False,
+                "error": "监听服务未在运行"
+            }
+        
+        try:
+            # 取消监听任务
+            if not self._forward_task.done():
+                self._forward_task.cancel()
+                try:
+                    await self._forward_task
+                except asyncio.CancelledError:
+                    pass
+            
+            # 计算实际监听时长
+            end_time = datetime.now()
+            duration = (end_time - self._monitor_start_time).total_seconds()
+            
+            # 更新状态
+            self._monitor_running = False
+            self._forward_task = None
+            
+            self._logger.info(f"监听服务已停止，ID: {self._monitor_id}, 持续时间: {duration}秒")
+            
+            # 返回停止结果
+            return {
+                "success": True,
+                "monitor_id": self._monitor_id,
+                "duration": duration,
+                "messages_forwarded": self._monitor_forwarded_count
+            }
+            
+        except Exception as e:
+            self._logger.error(f"停止监听服务失败: {str(e)}", exc_info=True)
+            return {
+                "success": False,
+                "error": f"停止监听服务失败: {str(e)}"
+            }
+    
+    def get_monitor_status(self) -> Dict[str, Any]:
+        """
+        获取监听服务状态
+        
+        Returns:
+            Dict[str, Any]: 监听服务状态信息，包含以下字段：
+                - running: 是否正在运行
+                - start_time: 开始时间
+                - end_time: 预计结束时间
+                - remaining_time: 剩余时间（秒）
+                - messages_forwarded: 已转发的消息数量
+                - channel_pairs: 监听的频道对
+                - errors: 错误统计
+        """
+        if not hasattr(self, '_monitor_running') or not self._monitor_running:
+            return {
+                "running": False
+            }
+        
+        # 计算剩余时间
+        now = datetime.now()
+        remaining_time = 0
+        if self._monitor_end_time and self._monitor_end_time > now:
+            remaining_time = (self._monitor_end_time - now).total_seconds()
+        
+        # 组装状态信息
+        status = {
+            "running": self._monitor_running,
+            "monitor_id": getattr(self, "_monitor_id", ""),
+            "start_time": self._monitor_start_time.isoformat() if hasattr(self, "_monitor_start_time") else None,
+            "end_time": self._monitor_end_time.isoformat() if hasattr(self, "_monitor_end_time") and self._monitor_end_time else None,
+            "remaining_time": remaining_time,
+            "messages_forwarded": getattr(self, "_monitor_forwarded_count", 0),
+            "channel_pairs": self._monitor_config.get("channel_pairs", {}) if hasattr(self, "_monitor_config") else {},
+            "errors": getattr(self, "_monitor_errors", {})
+        }
+        
+        return status
+    
+    async def _message_monitoring_task(self) -> None:
+        """
+        消息监听任务，监听源频道的新消息并转发
+        """
+        self._logger.info("开始监听消息")
+        
+        # 从监听配置中获取相关参数
+        if not hasattr(self, "_monitor_config") or not self._monitor_config:
+            self._logger.error("监听配置不存在，无法启动监听任务")
+            return
+            
+        channel_pairs = self._monitor_config.get("channel_pairs", {})
+        forward_delay = self._monitor_config.get("forward_delay", 2)
+        media_types = self._monitor_config.get("media_types", ["photo", "video", "document", "audio", "animation"])
+        remove_captions = self._monitor_config.get("remove_captions", False)
+        max_retries = self._monitor_config.get("max_retries", 3)
+        message_filter = self._monitor_config.get("message_filter", "")
+        
+        # 存储每个源频道的最新消息ID
+        last_message_ids = {}
+        
+        try:
+            while True:
+                # 检查是否到达结束时间
+                now = datetime.now()
+                if hasattr(self, "_monitor_end_time") and self._monitor_end_time and now >= self._monitor_end_time:
+                    self._logger.info(f"已到达监听结束时间: {self._monitor_end_time.isoformat()}")
+                    break
+                
+                # 处理每个频道对
+                for source_channel, target_channels in channel_pairs.items():
+                    try:
+                        # 检查目标频道是否有效
+                        if not target_channels:
+                            continue
+                            
+                        # 获取源频道最新消息ID
+                        latest_id = await self._client.get_latest_message_id(source_channel)
+                        if latest_id is None:
+                            self._logger.warning(f"无法获取频道 {source_channel} 的最新消息ID")
+                            continue
+                        
+                        # 获取上次处理的消息ID
+                        last_id = last_message_ids.get(source_channel, 0)
+                        
+                        # 首次运行只记录最新ID，不处理消息
+                        if last_id == 0:
+                            last_message_ids[source_channel] = latest_id
+                            self._logger.info(f"已记录频道 {source_channel} 的最新消息ID: {latest_id}")
+                            continue
+                        
+                        # 处理新消息
+                        if latest_id > last_id:
+                            self._logger.info(f"频道 {source_channel} 有新消息: {last_id+1} 到 {latest_id}")
+                            
+                            # 处理每条新消息
+                            for msg_id in range(last_id + 1, latest_id + 1):
+                                # 获取消息
+                                message = await self._client.get_message(source_channel, msg_id)
+                                if not message:
+                                    self._logger.warning(f"无法获取消息: {source_channel}, ID={msg_id}")
+                                    continue
+                                
+                                # 检查媒体类型是否符合条件
+                                message_type = self._get_message_type(message)
+                                if message_type not in media_types and message_type != "text":
+                                    self._logger.info(f"消息类型 {message_type} 不在转发列表中，跳过: {source_channel}, ID={msg_id}")
+                                    continue
+                                
+                                # 如果有过滤器，检查消息内容
+                                if message_filter and message.text:
+                                    # 简单实现的过滤器，如果消息中不包含过滤器文本则跳过
+                                    # 未来可以实现更复杂的过滤逻辑
+                                    if message_filter not in message.text:
+                                        self._logger.info(f"消息内容不符合过滤条件，跳过: {source_channel}, ID={msg_id}")
+                                        continue
+                                
+                                # 转发消息
+                                retry_count = 0
+                                while retry_count <= max_retries:
+                                    try:
+                                        # 对单条消息进行转发
+                                        result = await self.forward_message(
+                                            source_channel, 
+                                            msg_id, 
+                                            target_channels
+                                        )
+                                        
+                                        # 检查转发结果
+                                        if result.get("success", False):
+                                            self._logger.info(f"成功转发消息: {source_channel}, ID={msg_id}")
+                                            self._monitor_forwarded_count += 1
+                                            break
+                                        else:
+                                            error_msg = result.get("error", "未知错误")
+                                            self._logger.warning(f"转发消息失败: {source_channel}, ID={msg_id}, 错误: {error_msg}")
+                                            
+                                            # 记录错误统计
+                                            error_type = error_msg[:50]  # 截取错误类型
+                                            if error_type not in self._monitor_errors:
+                                                self._monitor_errors[error_type] = 0
+                                            self._monitor_errors[error_type] += 1
+                                            
+                                            # 准备重试
+                                            retry_count += 1
+                                            if retry_count <= max_retries:
+                                                self._logger.info(f"准备重试 ({retry_count}/{max_retries}): {source_channel}, ID={msg_id}")
+                                                await asyncio.sleep(2 * retry_count)  # 指数退避
+                                    except Exception as e:
+                                        self._logger.error(f"转发过程中出错: {source_channel}, ID={msg_id}, 错误: {str(e)}")
+                                        retry_count += 1
+                                        if retry_count <= max_retries:
+                                            await asyncio.sleep(2 * retry_count)
+                                        else:
+                                            break
+                                
+                                # 添加延迟，避免速率限制
+                                await asyncio.sleep(forward_delay)
+                            
+                            # 更新最新处理的消息ID
+                            last_message_ids[source_channel] = latest_id
+                    
+                    except Exception as e:
+                        self._logger.error(f"处理频道 {source_channel} 时出错: {str(e)}", exc_info=True)
+                        
+                        # 记录错误统计
+                        error_type = str(e)[:50]  # 截取错误类型
+                        if error_type not in self._monitor_errors:
+                            self._monitor_errors[error_type] = 0
+                        self._monitor_errors[error_type] += 1
+                
+                # 检查间隔，避免过于频繁轮询
+                await asyncio.sleep(10)  # 每10秒检查一次新消息
+                
+        except asyncio.CancelledError:
+            self._logger.info("监听任务已取消")
+            
+        except Exception as e:
+            self._logger.error(f"监听任务出错: {str(e)}", exc_info=True)
+            
+            # 记录错误统计
+            error_type = str(e)[:50]
+            if error_type not in self._monitor_errors:
+                self._monitor_errors[error_type] = 0
+            self._monitor_errors[error_type] += 1
+    
+    def _get_message_type(self, message) -> str:
+        """
+        获取消息的类型
+        
+        Args:
+            message: 消息对象
+            
+        Returns:
+            str: 消息类型，如 'photo', 'video', 'text' 等
+        """
+        if message.photo:
+            return "photo"
+        elif message.video:
+            return "video"
+        elif message.document:
+            return "document"
+        elif message.audio:
+            return "audio"
+        elif message.animation:
+            return "animation"
+        elif message.voice:
+            return "voice"
+        elif message.sticker:
+            return "sticker"
+        elif message.text:
+            return "text"
+        else:
+            return "unknown"
+    
+    async def _forward_monitoring_task(self) -> None:
+        """
+        转发监控任务，定期检查源频道的新消息并转发
+        """
+        self._logger.info(f"开始转发监控任务，检查间隔: {self._forward_interval}秒")
+        
+        # 存储每个源频道的最新消息ID
+        last_message_ids = {}
+        
+        try:
+            while True:
+                for source_channel in self._source_channels:
+                    try:
+                        # 获取该频道的最新消息ID
+                        latest_id = await self._client.get_latest_message_id(source_channel)
+                        
+                        if latest_id is None:
+                            self._logger.warning(f"无法获取频道 {source_channel} 的最新消息ID")
+                            continue
+                        
+                        # 检查是否有新消息
+                        last_id = last_message_ids.get(source_channel, 0)
+                        
+                        if last_id == 0:
+                            # 首次运行，仅记录最新ID但不转发
+                            last_message_ids[source_channel] = latest_id
+                            self._logger.info(f"已记录频道 {source_channel} 的最新消息ID: {latest_id}")
+                            continue
+                        
+                        if latest_id > last_id:
+                            self._logger.info(f"频道 {source_channel} 有新消息: {last_id+1} - {latest_id}")
+                            
+                            # 转发新消息
+                            for msg_id in range(last_id + 1, latest_id + 1):
+                                await self.forward_message(
+                                    source_channel,
+                                    msg_id,
+                                    self._target_channels
+                                )
+                                # 添加短暂延迟，避免API限制
+                                await asyncio.sleep(1)
+                            
+                            # 更新最新ID
+                            last_message_ids[source_channel] = latest_id
+                    
+                    except Exception as e:
+                        self._logger.error(f"处理频道 {source_channel} 的消息时出错: {str(e)}", exc_info=True)
+                
+                # 等待下一次检查
+                await asyncio.sleep(self._forward_interval)
+        
+        except asyncio.CancelledError:
+            self._logger.info("转发监控任务已取消")
+        
+        except Exception as e:
+            self._logger.error(f"转发监控任务出错: {str(e)}", exc_info=True)
+            raise
+
+    # 以下是内部辅助方法
     
     async def _forward_single_message(
         self, 

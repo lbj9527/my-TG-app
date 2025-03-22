@@ -94,4 +94,17 @@ class DownloaderInterface(ABC):
             message: 消息对象
             group_id: 媒体组ID（可选）
         """
+        pass
+    
+    @abstractmethod
+    async def download_messages(self, download_config: Dict[str, Any] = None) -> Dict[str, Any]:
+        """
+        下载消息和媒体
+        
+        Args:
+            download_config: 下载配置，为None时使用默认配置
+            
+        Returns:
+            Dict[str, Any]: 下载结果，包含成功和失败的下载信息
+        """
         pass 

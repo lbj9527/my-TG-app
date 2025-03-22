@@ -288,25 +288,129 @@ class ConfigManager(ConfigInterface):
         获取转发配置
         
         Returns:
-            Dict[str, Any]: 转发配置字典，包含start_message_id、end_message_id等参数
+            Dict[str, Any]: 转发配置字典，包含channel_pairs、start_id、end_id、limit、pause_time等参数
         """
         forward_config = self.get('forward', {})
-        if not forward_config:
-            # 提供默认配置
-            return {
-                'start_message_id': 1,
-                'end_message_id': None,
-                'limit_messages': 1000,
-                'caption_template': '{original_caption}',
-                'remove_captions': False,
-                'hide_author': True,
-                'delay': 1.5,
-                'batch_size': 30,
-                'skip_emoji_messages': False,
-                'default_mode': 'copy',
-                'download_media': True
-            }
+        
+        # 确保channel_pairs存在
+        if 'channel_pairs' not in forward_config or not forward_config['channel_pairs']:
+            channel_pairs = self.get_channel_pairs()
+            forward_config['channel_pairs'] = channel_pairs
+            
+        # 确保必要的参数存在，用默认值补全
+        defaults = {
+            'remove_captions': True,
+            'media_types': ['photo', 'video', 'document', 'audio', 'animation'],
+            'forward_delay': 2,
+            'timeout': 500,
+            'max_retries': 1,
+            'message_filter': '',
+            'add_watermark': False,
+            'watermark_text': '',
+            'forward_history': 'forward_history.json',
+            'start_id': 0,
+            'end_id': 2000,
+            'limit': 1000,
+            'pause_time': 300
+        }
+        
+        # 合并默认配置
+        for key, value in defaults.items():
+            if key not in forward_config:
+                forward_config[key] = value
+                
         return forward_config
+    
+    def get_download_config(self) -> Dict[str, Any]:
+        """
+        获取下载配置
+        
+        Returns:
+            Dict[str, Any]: 下载配置字典，包含source_channels、directory、timeout等参数
+        """
+        download_config = self.get('download', {})
+        if not download_config:
+            # 提供默认配置，与需求文档保持一致
+            return {
+                'source_channels': self.get_source_channels(),
+                'directory': 'downloads',
+                'organize_by_chat': True,
+                'timeout': 300,
+                'max_retries': 1,
+                'skip_existing': True,
+                'filename_pattern': '{chat_id}_{message_id}_{filename}',
+                'chunk_size': 1048576,
+                'download_history': 'download_history.json',
+                'start_id': 0,
+                'end_id': 1000,
+                'limit': 500,
+                'pause_time': 300
+            }
+        return download_config
+    
+    def get_upload_config(self) -> Dict[str, Any]:
+        """
+        获取上传配置
+        
+        Returns:
+            Dict[str, Any]: 上传配置字典，包含target_channels、directory、timeout等参数
+        """
+        upload_config = self.get('upload', {})
+        if not upload_config:
+            # 提供默认配置，与需求文档保持一致
+            return {
+                'target_channels': self.get_target_channels(),
+                'remove_captions': False,
+                'directory': 'uploads',
+                'verify_before_upload': True,
+                'timeout': 300,
+                'max_retries': 1,
+                'upload_history': 'upload_history.json',
+                'add_watermark': False,
+                'watermark_text': '',
+                'limit': 500,
+                'pause_time': 300
+            }
+        return upload_config
+    
+    def get_monitor_config(self) -> Dict[str, Any]:
+        """
+        获取监听配置
+        
+        Returns:
+            Dict[str, Any]: 监听配置字典，包含channel_pairs、duration、forward_delay等参数
+        """
+        monitor_config = self.get('monitor', {})
+        if not monitor_config:
+            # 使用转发配置中的channel_pairs或提供默认配置
+            channel_pairs = self.get_channel_pairs()
+            return {
+                'channel_pairs': channel_pairs,
+                'remove_captions': True,
+                'media_types': ['photo', 'video', 'document', 'audio', 'animation'],
+                'duration': '2025-3-28-1',  # 默认监听到2025年3月28日1点
+                'forward_delay': 2,
+                'max_retries': 3,
+                'message_filter': '',
+                'add_watermark': False,
+                'watermark_text': ''
+            }
+        return monitor_config
+    
+    def get_storage_config(self) -> Dict[str, Any]:
+        """
+        获取存储配置
+        
+        Returns:
+            Dict[str, Any]: 存储配置字典，包含tmp_path等参数
+        """
+        storage_config = self.get('storage', {})
+        if not storage_config:
+            # 提供默认配置，与需求文档保持一致
+            return {
+                'tmp_path': 'temp'
+            }
+        return storage_config
     
     def get_channel_pairs(self) -> Dict[str, List[Union[str, int]]]:
         """
@@ -315,7 +419,12 @@ class ConfigManager(ConfigInterface):
         Returns:
             Dict[str, List[Union[str, int]]]: 源频道到目标频道的映射字典
         """
-        pairs = self.get('channel_pairs', {})
+        # 首先尝试从forward部分读取channel_pairs
+        pairs = self.get('forward.channel_pairs', {})
+        if not pairs:
+            # 如果forward部分没有，尝试直接读取顶层的channel_pairs
+            pairs = self.get('channel_pairs', {})
+            
         result = {}
         
         # 处理配置文件中的频道对，确保每个源频道映射到一个目标频道列表
@@ -367,14 +476,15 @@ class ConfigManager(ConfigInterface):
                 if isinstance(config_id, str) and normalized_id in config_id:
                     return config
         
-        # 返回默认配置
+        # 返回默认配置，与需求文档保持一致
         return {
-            'caption_template': self.get('forward.caption_template', '{original_caption}'),
-            'remove_captions': self.get('forward.remove_captions', False),
-            'media_types': self.get('forward.media_types', ['photo', 'video', 'document', 'audio', 'voice', 'sticker', 'animation']),
-            'start_id': self.get('forward.start_message_id', 1),
-            'end_id': self.get('forward.end_message_id', None),
-            'limit_messages': self.get('forward.limit_messages', 1000)
+            'remove_captions': self.get('forward.remove_captions', True),
+            'media_types': self.get('forward.media_types', ['photo', 'video', 'document', 'audio', 'animation']),
+            'start_id': self.get('forward.start_id', 0),
+            'end_id': self.get('forward.end_id', 2000),
+            'message_filter': self.get('forward.message_filter', ''),
+            'add_watermark': self.get('forward.add_watermark', False),
+            'watermark_text': self.get('forward.watermark_text', '')
         }
     
     def validate(self) -> Dict[str, List[str]]:
@@ -394,8 +504,17 @@ class ConfigManager(ConfigInterface):
         if not telegram_section or not telegram_section.get('api_hash'):
             errors.setdefault('telegram.api_hash', []).append("API Hash不能为空")
         
-        # 验证新的频道配对配置
-        channel_pairs = self.get('channel_pairs', {})
+        # 验证频道配对配置
+        # 首先检查forward部分的channel_pairs
+        forward_section = self.config.get('forward', {})
+        forward_channel_pairs = forward_section.get('channel_pairs', {})
+        
+        # 然后检查顶层的channel_pairs
+        top_level_channel_pairs = self.config.get('channel_pairs', {})
+        
+        # 合并两个配置源
+        channel_pairs = forward_channel_pairs or top_level_channel_pairs
+        
         if not channel_pairs:
             errors.setdefault('channel_pairs', []).append("频道配对不能为空，至少需要一对源频道到目标频道的映射")
         
@@ -412,9 +531,9 @@ class ConfigManager(ConfigInterface):
             # 发现至少一个有效的配对
             valid_pairs = True
             
-        if not valid_pairs:
+        if not valid_pairs and channel_pairs:  # 只有在有channel_pairs但无有效配对时才添加此错误
             errors.setdefault('channel_pairs', []).append("没有找到有效的频道配对")
-            
+        
         # 验证源频道配置部分
         source_channel_config = self.get('source_channel_config', {})
         for source_id, config in source_channel_config.items():

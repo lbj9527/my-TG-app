@@ -83,4 +83,17 @@ class UploaderInterface(ABC):
         Returns:
             int: 清理的文件数量
         """
+        pass
+    
+    @abstractmethod
+    async def upload_files(self, upload_config: Dict[str, Any] = None) -> Dict[str, Any]:
+        """
+        上传本地文件到目标频道
+        
+        Args:
+            upload_config: 上传配置，为None时使用默认配置
+            
+        Returns:
+            Dict[str, Any]: 上传结果，包含成功和失败的上传信息
+        """
         pass 

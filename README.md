@@ -11,14 +11,14 @@ TG Forwarder 是一个功能强大的 Telegram 消息转发工具，用于在不
 - **频道关联**：灵活配置源频道与目标频道的对应关系
 - **任务调度**：支持计划任务和定时转发
 - **状态追踪**：详细记录消息转发状态，支持失败重试
-- **数据备份**：支持配置、数据库和媒体文件的备份和恢复
 - **命令行界面**：提供丰富的命令行操作方式
+- **媒体组顺序处理**：按媒体组 ID 进行有序转发，保证媒体组内消息顺序及媒体组间串行处理
 
 ## 系统要求
 
 - Python 3.7 或更高版本
 - 安装了 pip 包管理器
-- 在Windows平台上需要安装pywin32（用于信号处理）
+- 在 Windows 平台上需要安装 pywin32（用于信号处理）
 
 ## 安装步骤
 
@@ -46,10 +46,10 @@ TG Forwarder 是一个功能强大的 Telegram 消息转发工具，用于在不
    ```bash
    # 使用默认源安装
    pip install -r requirements.txt
-   
+
    # 推荐：使用清华大学镜像源加速安装（国内用户）
    pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
-   
+
    # Windows平台可能需要额外安装pywin32
    # pip install pywin32
    ```
@@ -67,13 +67,13 @@ TG Forwarder 使用 JSON 格式的配置文件。示例配置文件位于 `confi
 
 TG Forwarder 使用多个关键依赖包，主要包括：
 
-- **pyrogram**: Telegram API的Python客户端库，用于访问Telegram功能
-- **TgCrypto**: 加密库，加速Telegram API通信
+- **pyrogram**: Telegram API 的 Python 客户端库，用于访问 Telegram 功能
+- **TgCrypto**: 加密库，加速 Telegram API 通信
 - **aiohttp/asyncio**: 异步网络和协程支持，提供高效的并发操作
 - **pydantic**: 数据验证和设置管理
 - **loguru**: 简化的日志记录系统，提供详细的错误追踪
-- **aiosqlite**: 异步SQLite数据库接口，用于数据存储
-- **pywin32**: Windows平台特定功能支持，处理信号和系统调用
+- **aiosqlite**: 异步 SQLite 数据库接口，用于数据存储
+- **pywin32**: Windows 平台特定功能支持，处理信号和系统调用
 - **moviepy**: 视频处理库，用于生成缩略图和处理媒体
 
 完整的依赖列表请参考 `requirements.txt` 文件。
@@ -109,7 +109,6 @@ TG Forwarder 使用多个关键依赖包，主要包括：
 - **代理设置**：如需使用代理连接 Telegram，配置 `telegram.proxy` 部分
 - **转发设置**：在 `forward` 部分配置转发行为，如字幕模板、媒体处理等
 - **下载设置**：在 `download` 部分配置媒体下载行为
-- **备份设置**：在 `backup` 部分配置数据备份行为
 
 完整配置选项请参考示例配置文件 `config_ex.ini` 中的注释说明。
 
@@ -117,72 +116,109 @@ TG Forwarder 使用多个关键依赖包，主要包括：
 
 ### 初次使用
 
-首次运行会要求登录 Telegram 账号：
+首次运行需要登录 Telegram 账号，程序会自动请求登录：
 
 ```bash
-python run.py start
+python run.py forward
 ```
 
 按照提示输入手机号和验证码完成登录。登录状态会保存在会话文件中，下次运行不需要重复登录。
 
 ### 命令行操作
 
-TG Forwarder 支持多种命令行操作：
+TG Forwarder 支持四个主要命令行操作：
 
-#### 启动应用
+#### 历史消息转发
 
-```bash
-# 启动应用并自动开始转发服务
-python run.py start
-
-# 启动应用但不自动开始转发
-python run.py start --no-forward
-```
-
-#### 控制转发状态
+按照设置的消息范围，将源频道的历史消息保持原格式转发到目标频道：
 
 ```bash
-# 查看转发状态
-python run.py forward status
+# 使用默认配置进行历史消息转发
+python run.py forward
 
-# 启动转发服务
-python run.py forward start
+# 指定消息数量限制
+python run.py forward --limit 100
 
-# 停止转发服务
-python run.py forward stop
+# 指定消息ID范围
+python run.py forward --start-id 1000 --end-id 2000
 ```
 
-#### 转发单条消息
+支持的参数：
+
+- `--config-section`：使用的配置部分名称，默认为"forward"
+- `--limit`：覆盖配置文件中的消息数量限制
+- `--start-id`：覆盖配置文件中的起始消息 ID
+- `--end-id`：覆盖配置文件中的结束消息 ID
+
+#### 历史消息下载
+
+按照设置的消息范围，下载源频道的历史消息到配置文件中设置的下载保存路径：
 
 ```bash
-python run.py send --source @channel_name --target @target_channel --message-id 12345
+# 使用默认配置进行历史消息下载
+python run.py download
+
+# 指定源频道
+python run.py download --source-channels @channel1 @channel2
+
+# 指定下载目录
+python run.py download --directory "downloads/custom"
+
+# 指定消息范围和数量限制
+python run.py download --start-id 1000 --end-id 2000 --limit 500
 ```
 
-添加 `--download-media` 参数可以启用下载媒体后再转发：
+支持的参数：
+
+- `--config-section`：使用的配置部分名称，默认为"download"
+- `--limit`：覆盖配置文件中的消息数量限制
+- `--start-id`：覆盖配置文件中的起始消息 ID
+- `--end-id`：覆盖配置文件中的结束消息 ID
+- `--source-channels`：覆盖配置文件中的源频道列表
+- `--directory`：覆盖配置文件中的下载目录
+
+#### 本地文件上传
+
+将本地"上传路径"中的文件上传到目标频道：
 
 ```bash
-python run.py send --source @channel_name --target @target_channel --message-id 12345 --download-media
+# 使用默认配置上传本地文件
+python run.py upload
+
+# 指定目标频道
+python run.py upload --target-channels @channel1 @channel2
+
+# 指定上传目录和移除标题选项
+python run.py upload --directory "uploads/custom" --remove-captions
 ```
 
-#### 数据备份与恢复
+支持的参数：
+
+- `--config-section`：使用的配置部分名称，默认为"upload"
+- `--target-channels`：覆盖配置文件中的目标频道列表
+- `--directory`：覆盖配置文件中的上传文件目录
+- `--remove-captions`：覆盖配置文件中的移除字幕设置
+
+#### 最新消息监听转发
+
+监听源频道，检测到新消息就转发到目标频道：
 
 ```bash
-# 备份数据
-python run.py backup --path ./my_backup
+# 使用默认配置启动监听服务
+python run.py startmonitor
 
-# 恢复数据
-python run.py restore --path ./my_backup
+# 指定监听时长
+python run.py startmonitor --duration "2025-12-31-23"
+
+# 指定频道配对（JSON格式）
+python run.py startmonitor --channel-pairs '{"@source_channel": ["@target1", "@target2"]}'
 ```
 
-#### 健康检查和版本信息
+支持的参数：
 
-```bash
-# 执行健康检查
-python run.py healthcheck
-
-# 显示版本信息
-python run.py version
-```
+- `--config-section`：使用的配置部分名称，默认为"monitor"
+- `--duration`：覆盖配置文件中的监听时长设置，格式为年-月-日-时，例如 2025-12-31-23
+- `--channel-pairs`：覆盖配置文件中的频道对应关系，格式为 JSON 字符串
 
 ### 日志查看
 
@@ -247,21 +283,22 @@ python run.py version
    - 检查是否达到 Telegram API 限制
    - 查看日志文件获取详细错误信息
 
-3. **Windows平台启动错误 (NotImplementedError)**
+3. **Windows 平台启动错误 (NotImplementedError)**
 
-   - 这个错误是由于Windows平台不支持Unix风格的信号处理机制导致的
-   - 确保已安装pywin32包：`pip install pywin32`
-   - 如果在v1.9.1或更高版本仍然遇到此问题，请检查pywin32是否正确安装
-   - 可以尝试重新安装pywin32：`pip uninstall pywin32 && pip install pywin32`
-   - 更新到v1.9.2或更高版本，此版本进一步改进了Windows平台兼容性
+   - 这个错误是由于 Windows 平台不支持 Unix 风格的信号处理机制导致的
+   - 确保已安装 pywin32 包：`pip install pywin32`
+   - 如果在 v1.9.1 或更高版本仍然遇到此问题，请检查 pywin32 是否正确安装
+   - 可以尝试重新安装 pywin32：`pip uninstall pywin32 && pip install pywin32`
+   - 更新到 v1.9.2 或更高版本，此版本进一步改进了 Windows 平台兼容性
 
 4. **应用崩溃**
+
    - 检查日志文件了解错误原因
    - 确保配置文件格式正确
-   - 尝试以调试模式运行: `python run.py -l DEBUG start`
+   - 尝试以调试模式运行: `python run.py -l DEBUG forward`
 
 5. **接口兼容性问题**
-   - 如果遇到接口异步或同步方法的兼容性问题，请确保升级到v1.9.2或更高版本
+   - 如果遇到接口异步或同步方法的兼容性问题，请确保升级到 v0.2.1 或更高版本
    - 这些问题通常表现为`TypeError: object bool can't be used in 'await' expression`错误
    - 如果继续遇到问题，可能需要手动检查并确保所有接口和实现类的异步方法签名一致
    - 确保有关文件存储和状态跟踪的操作正确使用异步方法
@@ -282,446 +319,352 @@ python run.py version
 
 本工具仅用于合法用途。用户应遵守 Telegram 服务条款和相关法律法规，不得用于未经授权的内容转发或其他违法行为。
 
-## 版本更新记录
+## 版本历史
 
-### v1.9.2 (2023-07-20)
+### v0.3.1 (2024-08-10)
+
+#### 重构
+
+- **任务管理系统改进**：
+  - 完全移除对`TaskManager`的依赖，使用原生`asyncio`进行任务管理
+  - 删除`tg_forwarder/core/task_manager.py`文件和相关实现类
+  - 从`tg_forwarder/core/__init__.py`中移除`TaskManager`的导入和导出
+  - 重构`Forwarder`类中的任务创建和管理方法：
+    - 在`start_forwarding`方法中使用`asyncio.create_task`代替`task_manager.submit_task`
+    - 在`stop_forwarding`方法中优化任务取消逻辑
+    - 更新`schedule_forward`方法，实现基于`asyncio`的延时任务
+    - 改进`cancel_scheduled_forward`和`get_forward_status`方法
+  - 重构`Application`类，移除对`TaskManager`的引用
+  - 使用字典存储所有任务引用，实现更高效的任务跟踪
+
+#### 优化
+
+- **代码简化**：减少了代码复杂度和依赖关系
+- **性能提升**：直接使用 Python 内置的`asyncio`模块处理异步任务，减少中间层开销
+- **可维护性**：使代码结构更加清晰，降低了维护成本
+
+### v0.3.0 (2024-07-31)
+
+#### 新增
+
+- 精简命令行接口：
+
+  - 按照需求文档规范重构命令行接口，只保留四个主要命令：`forward`、`download`、`upload` 和 `startmonitor`
+  - 移除多余命令，使程序结构更加清晰简洁
+  - 为每个命令添加了丰富的参数选项，支持覆盖配置文件中的设置
+  - 提供更直观的命令行输出，包括操作进度和结果统计
+
+- 增强历史记录功能：
+  - 更好地支持跟踪下载、上传和转发状态
+  - 实现基于 JSON 文件的高效历史记录管理
+  - 添加了文件上传历史的特殊处理
+
+### v0.2.9 (2024-07-27)
+
+#### 新增
+
+- 完善监听转发功能的接口：
+  - 扩展 `ForwarderInterface`，添加监听相关的三个核心方法：
+    - `start_monitor`: 启动监听服务，实时监听源频道新消息并转发
+    - `stop_monitor`: 停止监听服务
+    - `get_monitor_status`: 获取监听服务的状态信息
+  - 增强 `ApplicationInterface`，添加与监听相关的三个方法：
+    - `start_monitor`: 应用级别的监听启动方法
+    - `stop_monitor`: 应用级别的监听停止方法
+    - `get_monitor_status`: 应用级别的监听状态查询方法
+  - 完善监听配置参数文档，明确支持的配置项：
+    - duration: 监听时长设置，使用"年-月-日-时"格式
+    - channel_pairs: 源频道与目标频道的映射关系
+    - media_types: 要转发的媒体类型
+    - message_filter: 消息过滤器表达式（预留接口）
+
+#### 优化
+
+- 接口一致性改进：
+  - 确保监听方法在接口与实现类之间保持一致的方法签名
+  - 为所有监听相关方法提供详细的参数和返回值文档
+  - 统一返回值格式，包含成功状态、错误信息和详细数据
+- 文档完善：
+  - 为所有监听相关的方法添加详细的文档字符串
+  - 明确说明配置参数的格式和用途
+  - 对返回值的各字段提供清晰的解释
+
+### v0.2.8 (2024-07-26)
+
+- **重大变更**：完全移除备份和恢复功能
+  - 删除`Application`类中的`backup_data()`和`restore_data()`方法
+  - 移除命令行界面中的`backup`和`restore`命令
+  - 更新 README 文档，移除所有备份功能相关描述
+- **优化**：代码精简，去除不必要的功能，保持核心功能更清晰
+- **文档**：更新所有相关文档，反映功能变更
+
+### v0.2.7 (2024-07-25)
+
+- **改进**：更新 Application 类，添加对 JsonStorage 和 HistoryTracker 的支持
+  - 添加`get_json_storage()`和`get_history_tracker()`方法检索新的存储组件实例
+  - 更新备份和恢复功能，使用 JSON 文件存储而非旧数据库
+  - 改进健康检查，验证 JSON 存储和历史跟踪器状态
+  - 优化应用初始化和关闭流程，确保新存储组件被正确处理
+- **文档**：更新备份和恢复功能文档，反映存储机制的变化
+
+### v0.2.6 (2024-07-25)
+
+#### 新增
+
+- 完整实现 `JsonStorage` 类：
+
+  - 实现 `create_history_structure` 方法，根据历史记录类型创建标准的 JSON 结构
+  - 实现 `update_timestamp` 方法，提供时间戳自动更新功能
+  - 实现 `merge_json_data` 方法，支持递归合并多个 JSON 数据
+  - 实现 `validate_history_structure` 方法，验证 JSON 数据结构的有效性
+  - 实现 `format_datetime` 方法，标准化 ISO 8601 格式时间输出
+  - 实现 `parse_datetime` 方法，支持解析多种 ISO 8601 格式的时间字符串
+
+- 完整实现 `HistoryTracker` 类：
+  - 实现 `register_channel_id` 和 `get_channel_id` 方法，支持频道 ID 与用户名的双向映射
+  - 实现 `mark_message_forwarded` 和 `get_forwarded_targets` 方法，追踪消息转发状态
+  - 实现 `add_file_upload_info` 和 `get_file_upload_info` 方法，管理文件上传的详细元数据
+  - 实现 `update_last_timestamp` 和 `get_last_timestamp` 方法，管理时间戳
+  - 实现 `export_history_data` 和 `import_history_data` 方法，支持历史数据的导入导出
+  - 添加 `_guess_media_type` 辅助方法，根据文件扩展名智能判断媒体类型
+
+#### 优化
+
+- 优化历史记录结构，采用标准的 JSON 格式，提高数据一致性和可读性
+- 改进错误处理，提供详细的日志信息便于调试
+- 完善数据完整性检查，防止无效数据结构导致的错误
+- 增强频道 ID 处理功能，支持多种频道标识方式（ID、用户名、链接）
+- 增强时间戳处理，支持毫秒级精度和时区信息
+
+#### 增强
+
+- 改进历史记录初始化过程，自动验证并修复无效的数据结构
+- 增强数据合并功能，避免数据丢失的情况
+- 提高文件路径标准化处理，确保跨平台兼容性
+- 增强频道 ID 映射缓存机制，提高查询性能
+
+### v0.2.5 (2024-07-24)
+
+#### 改进
+
+- 增强接口层以支持详细的历史记录 JSON 格式：
+
+  - 扩展 `HistoryTrackerInterface`，添加对频道 ID 与用户名映射的支持
+  - 添加 `register_channel_id` 和 `get_channel_id` 方法，便于频道识别
+  - 增加 `mark_message_forwarded` 和 `get_forwarded_targets` 方法，支持转发历史记录的详细跟踪
+  - 添加 `add_file_upload_info` 和 `get_file_upload_info` 方法，记录文件上传的元数据
+  - 增加时间戳相关方法 `update_last_timestamp` 和 `get_last_timestamp`
+  - 添加历史数据导入导出方法 `export_history_data` 和 `import_history_data`
+
+- 增强 `JsonStorageInterface` 以支持复杂的 JSON 数据结构：
+  - 添加 `create_history_structure` 方法创建标准历史记录结构
+  - 增加 `update_timestamp` 方法自动更新时间戳
+  - 添加 `merge_json_data` 方法合并 JSON 数据
+  - 增加 `validate_history_structure` 方法验证数据结构
+  - 添加日期时间处理方法 `format_datetime` 和 `parse_datetime`
+
+### v0.2.4 (2024-07-23)
+
+#### 新增
+
+- 重构存储和历史记录接口：
+  - 新增 `JsonStorageInterface` 接口，专注于 JSON 文件操作，更符合项目实际需求
+  - 新增 `HistoryTrackerInterface` 接口，专门管理下载、上传和转发历史记录
+  - 实现 `JsonStorage` 类，提供 JSON 文件读写功能
+  - 实现 `HistoryTracker` 类，提供历史记录跟踪功能
+  - 简化 JSON 文件操作，提高代码可维护性
+  - 使历史记录操作更加专注和高效
+  - 标记 `StorageInterface` 为废弃状态，计划在未来版本中完全移除，由 `JsonStorageInterface` 和 `HistoryTrackerInterface` 代替
+
+#### 优化
+
+- 接口设计改进：
+  - 简化了存储接口，移除不必要的数据库风格方法
+  - 增强了历史记录管理功能，使其更加符合需求文档
+  - 明确区分了存储操作和历史记录管理的职责
+  - 提高了代码的可读性和可维护性
+- 增强历史记录功能：
+  - 更好地支持跟踪下载、上传和转发状态
+  - 实现基于 JSON 文件的高效历史记录管理
+  - 添加了文件上传历史的特殊处理
+
+### v0.2.3 (2024-06-15)
+
+#### 改进
+
+- 完善程序文档：
+  - 在需求文档中详细说明了历史记录 JSON 文件格式
+  - 设计并添加了下载历史、上传历史和转发历史的 JSON 格式示例
+  - 为每种历史记录文件提供了清晰的结构说明和字段解释
+  - 增强了开发者对历史记录存储机制的理解
+
+#### 优化
+
+- 使用统一的 JSON 格式规范，确保历史记录数据的一致性
+- 添加时间戳记录，便于跟踪数据更新情况
+- 完善频道 ID 与用户名的对应关系存储
+
+### v0.2.2 (2024-06-12)
+
+#### 改进
+
+- 重构接口层：
+  - 更新 `ApplicationInterface`，添加 `get_json_storage` 和 `get_history_tracker` 方法
+  - 将 `ApplicationInterface.get_storage()` 标记为废弃
+  - 在 `interfaces/__init__.py` 中添加新接口的导入和导出
+
+#### 优化
+
+- 简化接口层依赖关系
+- 为接口迁移提供明确的过渡路径
+
+### v0.2.1 (2024-03-22)
+
+#### 改进
+
+- 优化配置文件结构：
+  - 重构 `config.json` 文件，移除冗余配置项（删除 `backup`、`notifications`、`channel_pairs`、`source_channel_config` 和 `task_manager` 配置）
+  - 保留核心功能配置：`telegram`、`log`、`ui` 和 `advanced`
+  - 增加新的功能模块配置：`download`、`upload`、`forward`、`monitor` 和 `storage`
+  - 每个功能模块配置项独立，提高代码可维护性
+
+#### 新增
+
+- 完善项目文档：
+
+  - 在 `program-doc.md` 中添加 `storage.tmp_path` 配置说明，明确其用途为禁止转发频道的媒体文件临时存储目录
+  - 增强配置字段说明，提高用户理解度
+
+- 重构接口层：
+  - 更新 `ConfigInterface` 接口，移除旧的配置获取方法，增加适配新配置结构的方法
+  - 修改 `ForwarderInterface.start_forwarding()` 方法，支持新的配置格式
+  - 在 `DownloaderInterface` 中添加 `download_messages()` 方法
+  - 在 `UploaderInterface` 中添加 `upload_files()` 方法
+  - 在 `StorageInterface` 中添加 `get_temp_directory()` 方法
+  - 在 `ApplicationInterface` 中添加新的功能方法，支持下载、上传和监听功能
+  - 精简接口层，移除不再需要的接口：
+    - 从 `ApplicationInterface` 中移除 `get_task_manager()`、`backup_data()` 和 `restore_data()` 方法
+    - 从 `ForwarderInterface` 中移除调度相关方法：`schedule_forward()`、`cancel_scheduled_forward()` 和 `get_forward_status()`
+    - 完全删除 `TaskManagerInterface` 接口文件，不再支持复杂的任务调度管理
+    - 从 `interfaces/__init__.py` 中移除对 `TaskManagerInterface` 的导入和导出
+    - 从 `StorageInterface` 中移除 `backup()` 和 `restore()` 方法，不再支持数据备份和恢复功能
+
+### v0.1.0 (2024-03-20)
+
+#### 核心变更
+
+- 完成了接口一致性验证：
+  - 确认 `get_forwarding_status` 方法在接口与实现中保持同步调用特性
+  - 验证了 `Application` 类中的同步状态获取方法能正确调用 `Forwarder` 的状态方法
+  - 完成对所有相关接口方法的全面测试与验证
+
+#### 修复
+
+- 修复了接口一致性问题：
+  - 在 `ForwarderInterface` 接口中添加了缺失的 `start_forwarding`、`stop_forwarding` 和 `get_forwarding_status` 方法定义
+  - 将 `Forwarder` 类中的 `start_forwarding` 和 `stop_forwarding` 方法修改为异步方法，以保持与 `ApplicationInterface` 接口的一致性
+  - 在 `Forwarder` 类中实现了 `get_forwarding_status` 方法，用于获取转发服务的状态
+  - 更新了 `Application` 类中的方法调用，添加了缺失的 `await` 关键字
+
+#### 基础构建
+
+- 基于原始项目 v1.9.2 代码进行分支开发
+- 重构项目结构，采用更现代的组织方式
+- 添加接口定义和实现的分离设计
+- 优化异步操作处理
+
+### 原项目版本
+
+#### v1.9.2 (2023-07-20)
+
 - 修复多个接口异步兼容性问题，确保接口定义与实现一致
-- 更新Storage类和StatusTracker类的异步方法实现
-- 修正Application类中对ConfigManager错误方法调用的问题
+- 更新 Storage 类和 StatusTracker 类的异步方法实现
+- 修正 Application 类中对 ConfigManager 错误方法调用的问题
 - 优化初始化流程，提高应用启动稳定性
-- 增强Windows平台支持，改善跨平台兼容性
+- 增强 Windows 平台支持，改善跨平台兼容性
 
-### v1.9.1 (2023-07-15)
-- 修复Windows平台上的信号处理兼容性问题(NotImplementedError)
-- 添加pywin32依赖支持Windows平台的优雅关闭
+#### v1.9.1 (2023-07-15)
+
+- 修复 Windows 平台上的信号处理兼容性问题(NotImplementedError)
+- 添加 pywin32 依赖支持 Windows 平台的优雅关闭
 - 优化启动和退出流程
 - 提高跨平台兼容性
 
-### v1.9.0 (2023-03-25)
+## 未来计划
 
-#### 项目架构改进与模块化重组
+### v0.4.0 计划功能
 
-本次更新对项目的整体架构进行了重要重组，更加清晰地划分了不同功能模块，提高了代码的模块化程度和整体可维护性。
+- **图形用户界面(GUI)实现**：
 
-##### 主要架构变更
+  - 基于 PyQt6 开发直观的用户界面
+  - 实现配置文件编辑器，可视化配置管理
+  - 添加实时转发状态监控面板
+  - 集成媒体文件预览功能
+  - 设计任务管理器，支持任务暂停、恢复和优先级调整
 
-- **转发模块独立**：
+- **性能优化**：
 
-  - 创建了新的 `forward` 子包，将 `forwarder.py` 移入该目录
-  - 添加了 `forward/__init__.py` 以导出 `MessageForwarder` 类
-  - 修改了主模块的导入路径以适应新结构
+  - 实现多线程下载和上传，提升并发处理能力
+  - 优化媒体文件处理流程，降低内存占用
+  - 改进历史记录存储机制，提高查询效率
+  - 添加本地文件缓存管理，避免重复下载
 
-- **工具类模块化**：
+- **高级功能增强**：
+  - 支持消息内容过滤，基于关键词、表情符号或正则表达式
+  - 增加自动水印功能，支持图片和视频水印
+  - 文件重命名模式扩展，支持更多变量和格式
+  - 添加媒体转码选项，自动调整媒体质量和格式
 
-  - 将各种工具类移入 `utils` 子包
-  - `channel_utils.py` 和 `channel_parser.py` 统一归入工具模块
-  - 添加了通用工具函数，促进代码重用
+### v0.5.0 计划功能
 
-- **导入优化**：
-  - 更新了所有模块的导入路径，确保兼容新结构
-  - 简化了模块间的依赖关系
-  - 优化了循环导入问题
+- **高级调度系统**：
 
-##### 新的项目结构
+  - 实现基于时间的任务调度
+  - 支持周期性任务定义
+  - 添加任务依赖关系管理
+  - 实现负载均衡和资源限制
 
-```
-tg_forwarder/
-├── __init__.py
-├── client.py
-├── config.py
-├── forward/
-│   ├── __init__.py
-│   └── forwarder.py
-├── manager.py
-├── downloader/
-│   ├── __init__.py
-│   ├── message_fetcher.py
-│   └── media_downloader.py
-├── uploader/
-│   ├── __init__.py
-│   ├── assember.py
-│   └── media_uploader.py
-├── logModule/
-│   ├── __init__.py
-│   └── logger.py
-├── taskQueue.py
-└── utils/
-    ├── __init__.py
-    ├── channel_utils.py
-    ├── channel_parser.py
-    └── common.py
-```
+- **报告和分析**：
 
-##### 代码质量改进
+  - 生成详细的转发任务报告
+  - 添加统计分析功能，展示转发模式和效率
+  - 实现图表可视化，直观展示使用情况
+  - 支持导出报告为 PDF 或 CSV 格式
 
-- **明确的模块边界**：
+- **安全和合规性增强**：
+  - 添加内容审查功能，防止敏感内容转发
+  - 实现用户权限管理，支持多用户操作
+  - 增强数据加密，保护会话和配置安全
+  - 添加合规性检查，确保遵循 Telegram API 使用条款
 
-  - 每个模块具有更清晰的责任边界
-  - 减少了跨模块访问的复杂度
-  - 提高了代码的可测试性
+我们欢迎社区贡献和反馈，以上计划可能会根据用户需求和项目发展进行调整。如有功能建议或问题报告，请通过 Issue 与我们联系。
 
-- **接口标准化**：
+## 版本更新记录
 
-  - 统一了各模块的公共接口设计
-  - 简化了模块间的交互方式
-  - 降低了模块间的耦合度
+### 版本 1.3.0 (2023-07-15)
 
-- **导入优化**：
-  - 使用了更清晰的相对导入语法
-  - 避免了循环导入问题
-  - 提高了导入层次的清晰度
+- 实现了按媒体组 ID 进行顺序转发的功能
+  - 修改了 `forward_range` 方法，确保媒体组内消息按 ID 排序处理
+  - 修改了 `forward_media_group` 方法，实现媒体组消息的有序转发
+  - 添加了媒体组之间的串行处理，避免消息错乱
+  - 优化了媒体组内和媒体组间的延迟策略
+- 添加了 `Downloader` 类中缺失的 `download_message` 方法实现
+- 改进了日志记录，增加媒体组信息的详细记录
 
-##### 使用示例
+### 版本 1.2.0 (2023-06-20)
 
-```python
-# 旧的导入方式
-from tg_forwarder.forwarder import MessageForwarder
+- 替换任务管理器，使用 asyncio 进行任务管理
+- 优化异步任务的创建和取消机制
+- 改进错误处理和状态跟踪
 
-# 新的导入方式
-from tg_forwarder.forward import MessageForwarder
-```
+### 版本 1.1.0 (2023-05-10)
 
-这次架构重组使项目结构更加清晰合理，符合 Python 项目的最佳实践，为未来的功能扩展和代码维护奠定了坚实基础。
+- 添加了新的配置选项
+- 增强了消息过滤功能
+- 改进了用户界面
 
-### v1.8.0 (2025-03-21)
+### 版本 1.0.0 (2023-04-01)
 
-#### 核心改进
-
-在本次更新中，我们对转发管理器的代码结构进行了重要重构，显著提高了代码的可维护性和可读性。
-
-##### 代码结构优化
-
-- **拆分 run 方法**：
-
-  - 将长达 400 行的 run 方法分解为 7 个职责明确的子方法
-  - 每个子方法专注于单一功能，遵循单一职责原则
-  - 提高了代码的可读性、可测试性和可维护性
-
-- **新增的子方法**：
-  - `_get_real_channel_ids`：获取源频道和目标频道的真实 ID
-  - `_setup_media_components`：设置媒体处理相关组件
-  - `_download_producer`：处理下载任务生产
-  - `_upload_producer`：处理上传任务生产
-  - `_upload_consumer`：处理上传任务消费
-  - `_process_download_upload`：处理完整的下载上传流程
-  - `_create_error_result`：创建标准错误结果
-
-##### 错误处理优化
-
-- **统一错误处理**：
-  - 使用`_create_error_result`方法统一生成错误结果格式
-  - 在所有可能发生错误的位置添加详细的错误日志
-  - 确保错误信息的一致性和可追踪性
-
-##### 媒体上传器初始化修复
-
-- **解决 MediaUploader 初始化问题**：
-  - 修复`_setup_media_components`方法，支持传入目标频道列表
-  - 解决了空目标频道列表导致初始化失败的问题
-  - 增加占位 ID 机制，确保在不提供真实 ID 时也能正常初始化
-  - 添加更多日志记录，便于调试上传过程
-
-#### 代码质量改进
-
-- **增强方法文档**：
-
-  - 为所有新方法添加详细的 docstring
-  - 明确参数类型和返回值
-  - 提供方法功能描述
-
-- **日志增强**：
-  - 添加关键流程节点的日志记录
-  - 在关键操作前后添加状态日志
-  - 为重要参数添加值验证日志
-
-#### 重构效益
-
-1. **可维护性**：单一职责的方法更易于维护和更新
-2. **可读性**：小型专注的方法更易于理解
-3. **可测试性**：独立方法便于单元测试
-4. **扩展性**：模块化结构为未来功能扩展奠定基础
-5. **稳定性**：更健壮的错误处理减少运行时崩溃
-
-此版本的重构是持续改进和代码质量提升计划的一部分，通过逐步优化代码结构，我们致力于打造更易于维护、更可靠的应用程序。
-
-### v1.7.0 (2025-03-20)
-
-### 核心改进
-
-在此版本中，我们对频道状态管理进行了重大优化，解决了频道状态信息分散在多个类中的问题。这些改进提高了代码的组织性、可维护性和可扩展性。
-
-#### 新增组件
-
-- **ChannelStateManager 类**：
-  - 专门负责集中管理所有频道状态信息
-  - 支持缓存过期机制，避免使用过时的状态信息
-  - 提供丰富的状态管理方法，如排序、清除缓存等
-
-#### 架构优化
-
-1. **状态管理集中化**：
-
-   - 将分散在多个类中的频道状态信息统一由`ChannelStateManager`管理
-   - 所有组件通过`ChannelStateManager`获取和设置频道状态
-
-2. **接口标准化**：
-
-   - 提供标准的状态获取和设置方法
-   - 统一的频道状态访问模式
-
-3. **向后兼容性**：
-   - 保留原有的缓存机制用于向后兼容
-   - 新的状态管理器与旧代码可以无缝协作
-
-#### 代码示例
-
-```python
-# 创建状态管理器
-channel_state_manager = ChannelStateManager()
-
-# 设置频道状态
-channel_state_manager.set_forward_status("channel_id", True)
-
-# 获取频道状态
-allow_forward = channel_state_manager.get_forward_status("channel_id")
-
-# 获取所有状态
-all_statuses = channel_state_manager.get_all_statuses()
-
-# 排序频道列表（优先转发允许的频道）
-sorted_channels = channel_state_manager.sort_channels_by_status(channels)
-
-# 清除缓存
-channel_state_manager.invalidate_cache("channel_id")  # 清除单个频道的缓存
-channel_state_manager.invalidate_cache()  # 清除所有缓存
-```
-
-#### 实施更改
-
-1. **ForwardManager 类**：
-
-   - 使用`ChannelStateManager`替代原有的`channel_forward_status`字典
-   - 更新相关方法，通过状态管理器操作频道状态
-
-2. **ChannelValidator 类**：
-
-   - 添加对`ChannelStateManager`的支持
-   - 在验证方法中更新状态管理器
-
-3. **未来扩展**：
-   - 为下载和上传功能准备了基础设施，支持在源频道禁止转发时的备用方案
-   - 通过状态管理器在系统各部分共享频道状态信息
-
-### 优化效果
-
-1. **状态一致性**：确保所有组件使用相同的频道状态信息
-2. **缓存管理**：通过过期机制避免使用过时的状态信息
-3. **代码清晰度**：分离状态管理逻辑，提高代码可读性
-4. **功能扩展**：为添加新的状态类型和管理功能提供了基础
-
-这些改进使系统更加健壮和可维护，为后续功能扩展打下了坚实基础。
-
-### v1.2.0 (2023-03-18)
-
-#### 禁止转发频道功能
-
-本次更新实现了对禁止转发频道的消息处理能力，通过下载后重新上传的方式克服了 Telegram 对禁止转发频道的限制。
-
-##### 核心新增功能
-
-- **任务队列系统**：
-
-  - 基于生产者-消费者模式的异步任务队列
-  - 支持并发处理和错误恢复
-  - 实时统计处理进度和结果
-
-- **媒体下载系统**：
-
-  - 按批次获取消息并分离媒体组
-  - 并发下载媒体文件，支持所有主流媒体类型
-  - 完整保存消息元数据，确保重建消息时的完整性
-
-- **媒体上传系统**：
-
-  - 支持重组媒体组并保持原始格式
-  - 智能处理 caption 和 media_group
-  - 上传到第一个目标频道后自动复制到其余频道
-
-- **错误处理机制**：
-  - 完善的错误处理和重试机制
-  - 自动处理 FloodWait 和 SlowmodeWait 限制
-  - 详细的错误日志记录
-
-##### 配置系统增强
-
-新增以下配置节点：
-
-```ini
-[DOWNLOAD]
-temp_folder = temp
-concurrent_downloads = 10
-chunk_size = 131072
-retry_count = 3
-retry_delay = 5
-
-[UPLOAD]
-concurrent_uploads = 3
-wait_between_messages = 1
-preserve_formatting = true
-```
-
-##### 模块结构
-
-新增的模块结构如下：
-
-```
-tg_forwarder/
-├── taskQueue.py            # 任务队列管理模块
-│   ├── __init__.py
-│   ├── message_fetcher.py  # 消息获取器
-│   ├── media_downloader.py # 媒体下载器
-├── uploader/
-│   ├── __init__.py
-│   ├── assember.py         # 消息重组器
-│   ├── media_uploader.py   # 媒体上传器
-└── utils/
-    ├── progress_tracker.py # 进度跟踪器
-    └── error_handler.py    # 错误处理器
-```
-
-##### 使用方式
-
-程序会自动检测源频道是否禁止转发，若禁止转发则自动切换到下载上传模式：
-
-1. 从源频道获取消息并按媒体组分组
-2. 并发下载所有媒体文件
-3. 重组消息并保持原始格式
-4. 上传到第一个目标频道
-5. 从第一个目标频道复制到其余频道
-
-这种方式确保了即使是禁止转发的频道内容也能被成功转发，同时保留了原始消息的格式和内容完整性。
-
-### v1.3.0 (2023-03-20)
-
-#### 临时客户端管理与媒体转发优化
-
-本次更新改进了临时客户端的管理机制和媒体组转发功能，提高了程序的稳定性和资源利用效率。
-
-##### 临时客户端管理优化
-
-- **客户端状态管理**：
-
-  - 引入`_client_initialized`标志追踪客户端状态
-  - 添加`initialize()`和`shutdown()`方法统一管理客户端生命周期
-  - 所有操作前统一检查客户端状态，确保连接可用
-
-- **长期会话支持**：
-
-  - 取消每批次创建和关闭临时客户端的机制
-  - 改为在应用启动时创建并在应用结束时关闭
-  - 显著降低认证开销和 API 调用频率
-
-- **错误处理增强**：
-  - 全面检查客户端初始化失败的情况
-  - 提供更清晰的错误信息和状态反馈
-  - 改进会话重连和异常恢复逻辑
-
-##### 媒体组转发功能增强
-
-- **媒体组完整性保证**：
-
-  - 添加`is_media_group`参数区分媒体组和单条消息
-  - 媒体组使用`copy_media_group()`方法进行转发
-  - 单条消息保持使用`copy_message()`方法
-
-- **上传历史记录完善**：
-  - 加入源频道 ID 作为记录键的一部分
-  - 正确处理不同源频道相同消息 ID 的情况
-  - 防止误判已上传状态
-
-##### 代码架构改进
-
-- **职责明确划分**：
-
-  - 分离客户端管理逻辑和业务逻辑
-  - 统一接口设计，提高代码可读性
-
-- **资源管理优化**：
-  - 减少不必要的客户端创建和释放
-  - 更合理地管理网络连接和系统资源
-
-##### 使用方式
-
-新版本的使用方式简化了客户端管理流程：
-
-1. 应用启动时调用`media_uploader.initialize()`初始化客户端
-2. 正常使用上传和转发功能，无需关心客户端状态
-3. 应用结束时调用`media_uploader.shutdown()`释放资源
-
-这些优化显著提高了程序在处理大批量媒体时的稳定性和效率，特别是对于需要长时间运行的任务。
-
-### v1.4.0 (2023-03-22)
-
-#### 新日志系统
-
-我们完全重构了日志系统，使用 loguru 库实现，提供了更简洁、高效的日志记录功能。
-
-##### 特点
-
-1. **简洁易用**：使用简单的 API 接口记录日志
-2. **分级管理**：支持 TRACE、DEBUG、INFO、SUCCESS、WARNING、ERROR、CRITICAL 多个日志级别
-3. **日志轮转**：自动根据配置进行日志轮转，避免日志文件过大
-4. **错误跟踪**：提供异常堆栈跟踪，方便 Debug
-5. **独立错误日志**：单独记录错误日志，方便问题排查
-
-##### 使用方法
-
-1. 初始化日志系统：
-
-```python
-from tg_forwarder.logs.logger import setup_logger
-
-# 设置日志系统
-setup_logger({
-    'level': 'INFO',  # 日志级别
-    'file': 'logs/app.log',  # 日志文件路径
-    'rotation': '10 MB',  # 日志轮转大小
-    'retention': '7 days'  # 日志保留时间
-})
-```
-
-2. 在代码中使用：
-
-```python
-from tg_forwarder.logs.logger import get_logger
-
-# 获取日志记录器
-logger = get_logger("module_name")  # 推荐使用模块名作为记录器名称
-
-# 记录不同级别的日志
-logger.debug("调试信息")
-logger.info("普通信息")
-logger.success("成功信息")
-logger.warning("警告信息")
-logger.error("错误信息")
-logger.critical("严重错误信息")
-
-# 记录异常
-try:
-    # 可能抛出异常的代码
-    result = some_function()
-except Exception as e:
-    logger.exception(f"发生错误: {str(e)}")  # 自动记录异常堆栈
-```
-
-##### 配置选项
-
-日志系统支持以下配置选项：
-
-- `level`: 日志级别，可选值包括 TRACE、DEBUG、INFO、SUCCESS、WARNING、ERROR、CRITICAL
-- `file`: 日志文件路径
-- `rotation`: 日志轮转策略，如"10 MB"、"1 day"等
-- `retention`: 日志保留策略，如"7 days"
-- `compression`: 日志压缩格式，如"zip"
-- `format`: 日志格式模板
-- `
+- 首次发布
+- 实现基本的消息转发功能
+- 支持媒体下载和上传

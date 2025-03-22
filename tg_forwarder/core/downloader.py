@@ -594,4 +594,287 @@ class Downloader(DownloaderInterface):
             key = f"metadata:{message.chat.id}:{message.id}"
             self._storage.store_data("downloads", key, metadata)
         except Exception as e:
-            self._logger.error(f"存储消息元数据失败: {str(e)}", exc_info=True) 
+            self._logger.error(f"存储消息元数据失败: {str(e)}", exc_info=True)
+    
+    async def download_messages(self, download_config: Dict[str, Any] = None) -> Dict[str, Any]:
+        """
+        下载消息和媒体
+        
+        Args:
+            download_config: 下载配置，为None时使用默认配置
+            
+        Returns:
+            Dict[str, Any]: 下载结果，包含成功和失败的下载信息
+        """
+        if not self._initialized:
+            await self.initialize()
+            
+        # 使用默认配置或合并提供的配置
+        if download_config is None:
+            download_config = self._config.get_download_config()
+        else:
+            default_config = self._config.get_download_config()
+            # 合并配置，优先使用提供的配置
+            for key, value in default_config.items():
+                if key not in download_config:
+                    download_config[key] = value
+                    
+        self._logger.info(f"开始下载消息，配置：{download_config}")
+        
+        result = {
+            "success": [],
+            "failed": [],
+            "skipped": [],
+            "total_downloads": 0
+        }
+        
+        try:
+            # 获取源频道
+            source_channels = download_config.get("source_channels", [])
+            if not source_channels:
+                self._logger.error("下载配置中没有指定源频道")
+                return {
+                    "success": False,
+                    "error": "下载配置中没有指定源频道",
+                    "detail": download_config
+                }
+                
+            # 获取其他配置
+            start_id = download_config.get("start_id", 0)
+            end_id = download_config.get("end_id", 1000)
+            limit = download_config.get("limit", 500)
+            pause_time = download_config.get("pause_time", 300)
+            
+            # 处理每个源频道
+            for source_channel in source_channels:
+                channel_result = await self._download_from_channel(
+                    source_channel, 
+                    start_id, 
+                    end_id, 
+                    limit,
+                    download_config
+                )
+                
+                # 合并结果
+                result["success"].extend(channel_result.get("success", []))
+                result["failed"].extend(channel_result.get("failed", []))
+                result["skipped"].extend(channel_result.get("skipped", []))
+                result["total_downloads"] += channel_result.get("total_downloads", 0)
+                
+                # 如果达到限制，暂停一段时间
+                if result["total_downloads"] >= limit:
+                    self._logger.info(f"已达到下载限制({limit})，暂停{pause_time}秒")
+                    await asyncio.sleep(pause_time)
+                    result["total_downloads"] = 0  # 重置计数
+            
+            return result
+            
+        except Exception as e:
+            self._logger.error(f"下载消息失败: {str(e)}", exc_info=True)
+            return {
+                "success": False,
+                "error": str(e),
+                "detail": {
+                    "success": result["success"],
+                    "failed": result["failed"],
+                    "skipped": result["skipped"],
+                    "total_downloads": result["total_downloads"]
+                }
+            }
+            
+    async def _download_from_channel(self, channel: str, start_id: int, end_id: int, 
+                                     limit: int, config: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        从指定频道下载消息
+        
+        Args:
+            channel: 频道标识符
+            start_id: 起始消息ID
+            end_id: 结束消息ID
+            limit: 最大下载数量
+            config: 下载配置
+            
+        Returns:
+            Dict[str, Any]: 下载结果
+        """
+        result = {
+            "success": [],
+            "failed": [],
+            "skipped": [],
+            "total_downloads": 0
+        }
+        
+        try:
+            # 解析频道标识符
+            chat = await self._client.get_chat(channel)
+            if not chat:
+                self._logger.error(f"无法获取频道信息: {channel}")
+                result["failed"].append({
+                    "channel": channel,
+                    "reason": "无法获取频道信息" 
+                })
+                return result
+                
+            chat_id = chat.id
+            
+            # 创建批次数据
+            batch = {
+                "chat_id": chat_id,
+                "messages": [],
+                "media_groups": {}
+            }
+            
+            # 获取指定范围的消息
+            messages = []
+            async for message in self._client.get_messages(
+                chat_id,
+                limit=end_id - start_id + 1,
+                offset_id=start_id
+            ):
+                if len(messages) >= limit:
+                    break
+                    
+                if not self._has_downloadable_media(message):
+                    continue
+                    
+                messages.append(message)
+                
+            # 分组媒体组消息和单条消息
+            for message in messages:
+                if message.media_group_id:
+                    # 媒体组消息
+                    if message.media_group_id not in batch["media_groups"]:
+                        batch["media_groups"][message.media_group_id] = []
+                    batch["media_groups"][message.media_group_id].append(message.id)
+                else:
+                    # 单条消息
+                    batch["messages"].append(message.id)
+                    
+            # 下载批次
+            batch_result = await self.download_media_batch(batch)
+            
+            # 合并结果
+            result["success"].extend(batch_result.get("success", []))
+            result["failed"].extend(batch_result.get("failed", []))
+            result["skipped"].extend(batch_result.get("skipped", []))
+            result["total_downloads"] += len(batch_result.get("success", []))
+            
+            return result
+            
+        except Exception as e:
+            self._logger.error(f"从频道 {channel} 下载消息失败: {str(e)}", exc_info=True)
+            result["failed"].append({
+                "channel": channel,
+                "reason": str(e)
+            })
+            return result 
+
+    async def download_message(self, chat_id: Union[str, int], message_id: int) -> Dict[str, Any]:
+        """
+        下载单个消息及其媒体内容
+        
+        Args:
+            chat_id: 聊天ID或用户名
+            message_id: 消息ID
+            
+        Returns:
+            Dict[str, Any]: 下载结果，包含消息数据和媒体文件路径
+        """
+        if not self._initialized:
+            await self.initialize()
+            
+        try:
+            # 获取消息
+            message = await self._client.get_message(chat_id, message_id)
+            if not message:
+                return {
+                    "success": False,
+                    "error": f"消息不存在: {chat_id}:{message_id}"
+                }
+            
+            # 检查是否是媒体组消息
+            if message.media_group_id:
+                # 获取完整的媒体组
+                media_group = await self._client.get_media_group(chat_id, message_id)
+                if not media_group:
+                    return {
+                        "success": False,
+                        "error": f"无法获取媒体组: {chat_id}:{message_id}"
+                    }
+                
+                # 下载媒体组中的所有消息
+                result = await self._download_media_group(chat_id, message.media_group_id, [msg.id for msg in media_group])
+                
+                # 提取消息数据
+                message_data = {
+                    "media_group_id": message.media_group_id,
+                    "is_media_group": True,
+                    "caption": message.caption,
+                    "date": message.date,
+                    "files": []
+                }
+                
+                # 从结果中提取文件信息
+                for item in result.get("success", []):
+                    message_data["files"].append({
+                        "message_id": item.get("message_id"),
+                        "file_path": item.get("file_path"),
+                        "media_type": item.get("media_type"),
+                        "caption": item.get("caption"),
+                    })
+                
+                return {
+                    "success": len(result.get("success", [])) > 0,
+                    "task_id": result.get("success", [{}])[0].get("task_id") if result.get("success") else None,
+                    "message_data": message_data,
+                    "is_media_group": True,
+                    "media_group_id": message.media_group_id
+                }
+            
+            # 处理单个消息
+            if not self._has_downloadable_media(message):
+                # 返回文本消息数据
+                return {
+                    "success": True,
+                    "task_id": None,
+                    "message_data": {
+                        "text": message.text,
+                        "caption": message.caption,
+                        "date": message.date,
+                        "is_media_group": False
+                    },
+                    "has_media": False
+                }
+            
+            # 下载单个媒体消息
+            result = await self._download_single_message(chat_id, message_id)
+            if not result.get("success", False):
+                return {
+                    "success": False,
+                    "error": result.get("error", "下载失败，无具体原因")
+                }
+                
+            data = result.get("data", {})
+            
+            # 构建消息数据
+            message_data = {
+                "file_path": data.get("file_path"),
+                "media_type": data.get("media_type"),
+                "caption": data.get("caption"),
+                "date": data.get("date"),
+                "is_media_group": False
+            }
+            
+            return {
+                "success": True,
+                "task_id": data.get("task_id"),
+                "message_data": message_data,
+                "has_media": True
+            }
+            
+        except Exception as e:
+            self._logger.error(f"下载消息 {chat_id}:{message_id} 失败: {str(e)}", exc_info=True)
+            return {
+                "success": False,
+                "error": str(e)
+            } 

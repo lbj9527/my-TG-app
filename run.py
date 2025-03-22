@@ -4,8 +4,8 @@
 TG Forwarder 应用程序入口点
 提供命令行接口和应用程序启动功能
 
-版本: v1.9.2
-更新日期: 2023-07-20
+版本: v0.3.0
+更新日期: 2024-07-31
 """
 
 import os
@@ -48,327 +48,270 @@ def setup_argument_parser() -> argparse.ArgumentParser:
         default="INFO"
     )
     
-    # 子命令
+    # 子命令 - 简化后只保留命令名称，所有参数只从配置文件读取
     subparsers = parser.add_subparsers(dest="command", help="命令")
     
-    # 启动命令
-    start_parser = subparsers.add_parser(
-        "start", 
-        help="启动应用程序"
-    )
-    start_parser.add_argument(
-        "--no-forward", 
-        action="store_true", 
-        help="启动应用但不自动开始转发"
-    )
-    
-    # 转发控制命令
-    forward_parser = subparsers.add_parser(
+    # 1. 历史消息转发命令
+    subparsers.add_parser(
         "forward", 
-        help="控制转发功能"
-    )
-    forward_parser.add_argument(
-        "action", 
-        choices=["start", "stop", "status"], 
-        help="转发操作: 启动、停止或查看状态"
+        help="按照设置的消息范围，将源频道的历史消息保持原格式转发到目标频道"
     )
     
-    # 转发单条消息命令
-    send_parser = subparsers.add_parser(
-        "send", 
-        help="转发单条消息"
-    )
-    send_parser.add_argument(
-        "--source", 
-        required=True, 
-        help="源频道标识(ID或用户名)"
-    )
-    send_parser.add_argument(
-        "--target", 
-        required=True, 
-        help="目标频道标识(ID或用户名)"
-    )
-    send_parser.add_argument(
-        "--message-id", 
-        type=int, 
-        required=True, 
-        help="消息ID"
-    )
-    send_parser.add_argument(
-        "--download-media", 
-        action="store_true", 
-        help="下载媒体后发送"
-    )
-    
-    # 备份与恢复命令
-    backup_parser = subparsers.add_parser(
-        "backup", 
-        help="备份应用数据"
-    )
-    backup_parser.add_argument(
-        "--path", 
-        help="备份目录路径", 
-        default=None
-    )
-    
-    restore_parser = subparsers.add_parser(
-        "restore", 
-        help="恢复应用数据"
-    )
-    restore_parser.add_argument(
-        "--path", 
-        required=True, 
-        help="备份目录路径"
-    )
-    
-    # 健康检查命令
+    # 2. 历史消息下载命令
     subparsers.add_parser(
-        "healthcheck", 
-        help="执行应用健康检查"
+        "download", 
+        help="按照设置的消息范围，下载源频道的历史消息到配置文件中设置的下载保存路径"
     )
     
-    # 版本命令
+    # 3. 本地文件上传命令
     subparsers.add_parser(
-        "version", 
-        help="显示应用版本"
+        "upload", 
+        help="将本地'上传路径'中的文件上传到目标频道"
+    )
+    
+    # 4. 最新消息监听转发命令
+    subparsers.add_parser(
+        "startmonitor", 
+        help="监听源频道，检测到新消息就转发到目标频道"
     )
     
     return parser
 
 
-async def start_application(args: argparse.Namespace) -> None:
+async def forward_messages(args: argparse.Namespace) -> None:
     """
-    启动应用
+    按照设置的消息范围，将源频道的历史消息转发到目标频道
     
     Args:
         args: 命令行参数
     """
-    print("正在启动 TG Forwarder 应用...")
-    
-    # 创建应用实例
     app = Application(config_path=args.config)
     
     # 使用Application类中的全局信号处理设置
-    # 这将处理所有平台上的信号，包括Windows
     Application.setup_signal_handling()
     
-    # 初始化应用
-    init_success = await app.initialize()
-    if not init_success:
-        print("应用初始化失败，无法启动")
-        await app.shutdown()
-        sys.exit(1)
-    
-    # 根据参数决定是否自动启动转发
-    if args.command == "start" and not args.no_forward:
-        print("自动启动转发服务...")
-        forward_success = await app.start_forwarding()
-        if not forward_success:
-            print("警告: 转发服务启动失败，应用将继续运行但不会转发消息")
-    
-    print("应用已就绪，按Ctrl+C退出")
-    
-    try:
-        # 持续运行直到收到停止信号
-        while True:
-            await asyncio.sleep(1)
-    except asyncio.CancelledError:
-        pass
-    finally:
-        # 尝试优雅关闭，但如果失败，直接退出
-        try:
-            await asyncio.wait_for(app.shutdown(), timeout=5.0)
-        except (asyncio.TimeoutError, Exception) as e:
-            print(f"关闭应用时遇到问题: {e}")
-            print("强制退出程序")
-            os._exit(0)
-
-
-async def forward_control(args: argparse.Namespace) -> None:
-    """
-    控制转发功能
-    
-    Args:
-        args: 命令行参数
-    """
-    app = Application(config_path=args.config)
     await app.initialize()
     
     try:
-        if args.action == "start":
-            result = await app.start_forwarding()
-            print(f"转发服务启动: {'成功' if result else '失败'}")
-        
-        elif args.action == "stop":
-            result = await app.stop_forwarding()
-            print(f"转发服务停止: {'成功' if result else '失败'}")
-        
-        elif args.action == "status":
-            status = app.get_application_status()
-            print(f"应用状态: {'运行中' if status.get('running', False) else '已停止'}")
+        # 获取转发配置
+        config = app.get_config()
+        forward_config = config.get_forward_config()
             
-            if status.get('initialized', False):
-                if "forwarder" in status:
-                    forwarder_status = status["forwarder"]
-                    print(f"消息已转发: {forwarder_status.get('messages_forwarded', 0)}")
-                    print(f"转发失败: {forwarder_status.get('forward_failures', 0)}")
-                
-                if "task_manager" in status:
-                    task_status = status["task_manager"]
-                    print(f"活跃任务: {task_status.get('active_tasks', 0)}")
-                    print(f"总任务数: {task_status.get('total_tasks', 0)}")
-    
-    finally:
-        await app.shutdown()
-
-
-async def send_message(args: argparse.Namespace) -> None:
-    """
-    转发单条消息
-    
-    Args:
-        args: 命令行参数
-    """
-    app = Application(config_path=args.config)
-    await app.initialize()
-    
-    try:
+        print(f"开始转发历史消息...")
+        print(f"消息ID范围: {forward_config.get('start_id', 0)} - {forward_config.get('end_id', '最新消息')}")
+        print(f"消息数量限制: {forward_config.get('limit', '无限制')}")
+        print(f"频道配对: {len(forward_config.get('channel_pairs', {}))}对")
+        
+        # 开始转发
         forwarder = app.get_forwarder()
-        result = await forwarder.forward_message(
-            source_chat=args.source,
-            target_chat=args.target,
-            message_id=args.message_id,
-            download_media=args.download_media
-        )
+        if forwarder is None:
+            print("错误: 转发器初始化失败。请检查配置文件中的channel_pairs是否正确设置。")
+            print("channel_pairs应该包含源频道到目标频道的映射，例如:")
+            print('  "channel_pairs": {')
+            print('    "https://t.me/source_channel": ["https://t.me/target1", "https://t.me/target2"]')
+            print('  }')
+            return
+            
+        result = await forwarder.start_forwarding(forward_config=forward_config)
         
-        if result["success"]:
-            print("消息转发成功")
-            print(f"转发ID: {result.get('forward_id')}")
+        if isinstance(result, dict) and result.get("success", False):
+            print("历史消息转发成功完成")
+            print(f"成功转发: {result.get('forwarded', 0)}条消息")
+            print(f"失败: {result.get('failed', 0)}条消息")
+            print(f"跳过: {result.get('skipped', 0)}条消息")
         else:
-            print(f"消息转发失败: {result.get('error')}")
+            print(f"历史消息转发失败: {result}")
     
     finally:
         await app.shutdown()
 
 
-async def backup_data(args: argparse.Namespace) -> None:
+async def download_messages(args: argparse.Namespace) -> None:
     """
-    备份应用数据
+    按照设置的消息范围，下载源频道的历史消息
     
     Args:
         args: 命令行参数
     """
     app = Application(config_path=args.config)
+    
+    # 使用Application类中的全局信号处理设置
+    Application.setup_signal_handling()
+    
     await app.initialize()
     
     try:
-        result = await app.backup_data(backup_path=args.path)
-        
-        if result["success"]:
-            print(f"数据备份成功: {result.get('backup_path')}")
-            print(f"备份时间: {result.get('timestamp')}")
+        # 获取下载配置
+        config = app.get_config()
+        download_config = config.get_download_config()
             
-            components = result.get("components", {})
-            print("备份组件:")
-            print(f"- 配置: {'成功' if components.get('config', False) else '失败'}")
-            print(f"- 数据库: {'成功' if components.get('database', False) else '失败'}")
-            print(f"- 媒体文件: {'成功' if components.get('media', False) else '跳过'}")
+        print(f"开始下载历史消息...")
+        print(f"消息ID范围: {download_config.get('start_id', 0)} - {download_config.get('end_id', '最新消息')}")
+        print(f"消息数量限制: {download_config.get('limit', '无限制')}")
+        print(f"源频道: {', '.join(str(ch) for ch in download_config.get('source_channels', []))}")
+        print(f"下载目录: {download_config.get('directory', 'downloads')}")
+        
+        # 开始下载
+        downloader = app.get_downloader()
+        if downloader is None:
+            print("错误: 下载器初始化失败。请检查配置文件中的source_channels是否正确设置。")
+            print("下载配置应包含source_channels列表，例如:")
+            print('  "download": {')
+            print('    "source_channels": ["@channel_username1", "@channel_username2"],')
+            print('    "directory": "downloads"')
+            print('  }')
+            return
+            
+        result = await downloader.download_messages(download_config=download_config)
+        
+        if isinstance(result, dict) and "success" in result:
+            if result.get("success") is False:
+                print(f"下载失败: {result.get('error', '未知错误')}")
+            else:
+                print("下载任务完成")
+                print(f"成功下载: {len(result.get('success', []))}个文件")
+                print(f"失败: {len(result.get('failed', []))}个文件")
+                print(f"跳过: {len(result.get('skipped', []))}个文件")
         else:
-            print(f"数据备份失败: {result.get('error')}")
+            print(f"下载任务完成")
     
     finally:
         await app.shutdown()
 
 
-async def restore_data(args: argparse.Namespace) -> None:
+async def upload_files(args: argparse.Namespace) -> None:
     """
-    恢复应用数据
+    将本地文件上传到目标频道
     
     Args:
         args: 命令行参数
     """
     app = Application(config_path=args.config)
     
+    # 使用Application类中的全局信号处理设置
+    Application.setup_signal_handling()
+    
+    await app.initialize()
+    
     try:
-        # 这里不需要初始化，因为恢复过程会自行处理初始化
-        result = await app.restore_data(backup_path=args.path)
+        # 获取上传配置
+        config = app.get_config()
+        upload_config = config.get_upload_config()
+            
+        print(f"开始上传本地文件...")
+        print(f"上传目录: {upload_config.get('directory', 'uploads')}")
+        print(f"目标频道: {', '.join(str(ch) for ch in upload_config.get('target_channels', []))}")
         
-        if result["success"]:
-            print(f"数据恢复成功: {result.get('backup_path')}")
-            print(f"恢复时间: {result.get('timestamp')}")
+        # 开始上传
+        uploader = app.get_uploader()
+        if uploader is None:
+            print("错误: 上传器初始化失败。请检查配置文件中的target_channels是否正确设置。")
+            print("上传配置应包含target_channels列表，例如:")
+            print('  "upload": {')
+            print('    "target_channels": ["@channel_username1", "@channel_username2"],')
+            print('    "directory": "uploads"')
+            print('  }')
+            return
             
-            components = result.get("components", {})
-            print("恢复组件:")
-            print(f"- 配置: {'成功' if components.get('config', False) else '失败'}")
+        result = await app.upload_files(upload_config)
+        
+        if isinstance(result, dict) and result.get("success", False):
+            print("文件上传成功完成")
+            print(f"成功上传: {result.get('success_count', 0)}个文件")
+            print(f"失败: {result.get('failed_count', 0)}个文件")
+            print(f"跳过: {result.get('skipped_count', 0)}个文件")
+        else:
+            print(f"文件上传失败: {result}")
+    
+    finally:
+        await app.shutdown()
+
+
+async def start_monitor(args: argparse.Namespace) -> None:
+    """
+    启动监听服务，实时监听源频道的新消息并转发
+    
+    Args:
+        args: 命令行参数
+    """
+    app = Application(config_path=args.config)
+    
+    # 使用Application类中的全局信号处理设置
+    Application.setup_signal_handling()
+    
+    await app.initialize()
+    
+    try:
+        # 获取监听配置
+        config = app.get_config()
+        monitor_config = config.get_monitor_config()
+        
+        if not monitor_config.get("channel_pairs"):
+            print("错误: 监听配置中缺少频道配对。请检查配置文件中的monitor.channel_pairs设置。")
+            print("监听配置应包含channel_pairs映射，例如:")
+            print('  "monitor": {')
+            print('    "channel_pairs": {')
+            print('      "https://t.me/source_channel": ["https://t.me/target1", "https://t.me/target2"]')
+            print('    },')
+            print('    "duration": "2025-3-28-1"')
+            print('  }')
+            return
             
-            db_result = components.get("database", {})
-            if isinstance(db_result, dict):
-                print(f"- 数据库: {'成功' if db_result.get('success', False) else '失败'}")
-            else:
-                print(f"- 数据库: {'成功' if db_result else '失败'}")
-            
-            media_result = components.get("media", {})
-            if isinstance(media_result, dict):
-                if media_result.get("skipped", False):
-                    print("- 媒体文件: 跳过")
+        # 解析持续时间
+        duration = monitor_config.get("duration", "2025-12-31-23")
+        try:
+            parts = duration.split("-")
+            if len(parts) >= 3:
+                year, month, day = map(int, parts[:3])
+                hour = int(parts[3]) if len(parts) > 3 else 0
+                from datetime import datetime
+                end_time = datetime(year, month, day, hour)
+                
+                print(f"开始监听源频道的消息...")
+                print(f"频道配对: {len(monitor_config.get('channel_pairs', {}))}对")
+                print(f"监听截止时间: {end_time.strftime('%Y-%m-%d %H:%M:%S')}")
+                
+                # 开始监听
+                forwarder = app.get_forwarder()
+                if forwarder is None:
+                    print("错误: 转发器初始化失败。请检查Telegram API配置是否正确。")
+                    return
+                    
+                result = await app.start_monitor(monitor_config)
+                
+                if isinstance(result, dict) and result.get("success", False):
+                    print(f"监听服务已启动，监听ID: {result.get('monitor_id', '')}")
+                    print(f"按Ctrl+C退出监听")
+                    
+                    # 持续运行，直到用户中断
+                    try:
+                        while True:
+                            await asyncio.sleep(60)  # 每分钟检查一次
+                            
+                            # 获取监听状态
+                            status = app.get_monitor_status()
+                            if not status.get("running", False):
+                                print("监听服务已停止")
+                                break
+                    except KeyboardInterrupt:
+                        print("\n正在停止监听...")
+                        stop_result = await app.stop_monitor()
+                        if stop_result.get("success", False):
+                            print("监听服务已停止")
+                            print(f"已转发: {stop_result.get('messages_forwarded', 0)}条消息")
+                        else:
+                            print(f"停止监听服务失败: {stop_result.get('error', '未知错误')}")
                 else:
-                    print(f"- 媒体文件: {'成功' if media_result.get('success', False) else '失败'}")
+                    print(f"启动监听服务失败: {result.get('error', '未知错误')}")
             else:
-                print(f"- 媒体文件: {'成功' if media_result else '失败'}")
-        else:
-            print(f"数据恢复失败: {result.get('error')}")
+                print(f"无效的持续时间格式: {duration}")
+                print("格式应为: 年-月-日-时，如 2025-3-28-1")
+        except Exception as e:
+            print(f"解析监听持续时间出错: {str(e)}")
     
     finally:
+        # 如果不是因为键盘中断，确保应用程序正常关闭
         await app.shutdown()
-
-
-async def health_check(args: argparse.Namespace) -> None:
-    """
-    执行应用健康检查
-    
-    Args:
-        args: 命令行参数
-    """
-    app = Application(config_path=args.config)
-    await app.initialize()
-    
-    try:
-        result = await app.health_check()
-        
-        print(f"健康状态: {result.get('status', 'unknown')}")
-        print(f"时间戳: {result.get('timestamp')}")
-        
-        components = result.get("components", {})
-        print("\n组件状态:")
-        
-        for name, status in components.items():
-            print(f"- {name}: {status.get('status')}")
-            
-            if name == "client":
-                print(f"  连接状态: {'已连接' if status.get('healthy') else '未连接'}")
-            
-            elif name == "task_manager" and "active_tasks" in status:
-                print(f"  活跃任务: {status.get('active_tasks')}")
-            
-            elif name == "forwarder" and "running" in status:
-                print(f"  运行状态: {'运行中' if status.get('running') else '已停止'}")
-        
-        sys.exit(0 if result.get("success") else 1)
-    
-    finally:
-        await app.shutdown()
-
-
-async def show_version(args: argparse.Namespace) -> None:
-    """
-    显示应用版本
-    
-    Args:
-        args: 命令行参数
-    """
-    app = Application(config_path=args.config)
-    version = app.get_version()
-    print(f"TG Forwarder 版本: {version}")
 
 
 def main() -> None:
@@ -382,21 +325,17 @@ def main() -> None:
         format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
     )
     
-    # 如果没有指定命令，默认为启动
-    if not args.command:
-        args.command = "start"
-        args.no_forward = False
-    
     # 根据命令选择操作
     commands = {
-        "start": start_application,
-        "forward": forward_control,
-        "send": send_message,
-        "backup": backup_data,
-        "restore": restore_data,
-        "healthcheck": health_check,
-        "version": show_version
+        "forward": forward_messages,
+        "download": download_messages,
+        "upload": upload_files,
+        "startmonitor": start_monitor
     }
+    
+    if not args.command:
+        parser.print_help()
+        sys.exit(1)
     
     if args.command in commands:
         asyncio.run(commands[args.command](args))

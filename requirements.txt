@@ -1,5 +1,5 @@
 # TG Forwarder - 依赖包
-# 版本 v1.9.2 (2023-07-20)
+# 版本 v0.2.2 (2024-03-22)
 # 推荐使用清华大学镜像源安装：pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
 
 # Telegram客户端库

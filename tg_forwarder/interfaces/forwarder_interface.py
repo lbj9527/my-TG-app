@@ -102,51 +102,6 @@ class ForwarderInterface(ABC):
         pass
     
     @abstractmethod
-    async def schedule_forward(self, source_channel: Union[str, int],
-                             message_id: Union[int, Tuple[int, int]],
-                             schedule_time: datetime,
-                             target_channels: List[Union[str, int]] = None) -> str:
-        """
-        调度消息转发任务
-        
-        Args:
-            source_channel: 源频道标识
-            message_id: 消息ID或范围(起始ID, 结束ID)
-            schedule_time: 调度时间
-            target_channels: 目标频道列表，为None时使用配置的默认目标
-            
-        Returns:
-            str: 任务ID
-        """
-        pass
-    
-    @abstractmethod
-    async def cancel_scheduled_forward(self, task_id: str) -> bool:
-        """
-        取消调度的转发任务
-        
-        Args:
-            task_id: 任务ID
-            
-        Returns:
-            bool: 取消是否成功
-        """
-        pass
-    
-    @abstractmethod
-    async def get_forward_status(self, task_id: str) -> Dict[str, Any]:
-        """
-        获取转发任务状态
-        
-        Args:
-            task_id: 任务ID
-            
-        Returns:
-            Dict[str, Any]: 任务状态信息
-        """
-        pass
-    
-    @abstractmethod
     async def get_forward_statistics(self, start_date: Optional[datetime] = None,
                                    end_date: Optional[datetime] = None) -> Dict[str, Any]:
         """
@@ -171,5 +126,103 @@ class ForwarderInterface(ABC):
             
         Returns:
             Dict[str, Any]: 重试结果
+        """
+        pass
+    
+    @abstractmethod
+    async def start_forwarding(
+        self,
+        forward_config: Dict[str, Any] = None,
+        monitor_mode: bool = False
+    ) -> Dict[str, Any]:
+        """
+        启动转发服务
+        
+        Args:
+            forward_config: 转发配置，为None时使用默认配置
+            monitor_mode: 是否为监听模式，为True时使用monitor配置
+            
+        Returns:
+            Dict[str, Any]: 启动结果
+        """
+        pass
+    
+    @abstractmethod
+    async def stop_forwarding(self) -> Dict[str, Any]:
+        """
+        停止转发服务
+        
+        Returns:
+            Dict[str, Any]: 停止结果
+        """
+        pass
+    
+    @abstractmethod
+    def get_forwarding_status(self) -> Dict[str, Any]:
+        """
+        获取转发服务状态
+        
+        Returns:
+            Dict[str, Any]: 转发服务状态信息
+        """
+        pass
+        
+    @abstractmethod
+    async def start_monitor(
+        self,
+        monitor_config: Dict[str, Any] = None
+    ) -> Dict[str, Any]:
+        """
+        启动监听服务，实时监听源频道的新消息并转发到目标频道
+        
+        Args:
+            monitor_config: 监听配置，为None时使用默认配置。配置应包含：
+                - channel_pairs: 源频道与目标频道的映射关系
+                - duration: 监听时长，格式为"年-月-日-时"，如"2025-3-28-1"
+                - remove_captions: 是否移除原始字幕
+                - media_types: 要转发的媒体类型列表
+                - forward_delay: 转发延迟（秒）
+                - max_retries: 失败后最大重试次数
+                - message_filter: 消息过滤器表达式
+            
+        Returns:
+            Dict[str, Any]: 启动结果，包含以下字段：
+                - success: 是否成功启动
+                - error: 如果失败，包含错误信息
+                - monitor_id: 监听任务ID
+                - start_time: 开始时间
+                - end_time: 预计结束时间（根据duration计算）
+        """
+        pass
+    
+    @abstractmethod
+    async def stop_monitor(self) -> Dict[str, Any]:
+        """
+        停止监听服务
+        
+        Returns:
+            Dict[str, Any]: 停止结果，包含以下字段：
+                - success: 是否成功停止
+                - error: 如果失败，包含错误信息
+                - monitor_id: 监听任务ID
+                - duration: 实际监听时长（秒）
+                - messages_forwarded: 已转发的消息数量
+        """
+        pass
+    
+    @abstractmethod
+    def get_monitor_status(self) -> Dict[str, Any]:
+        """
+        获取监听服务状态
+        
+        Returns:
+            Dict[str, Any]: 监听服务状态信息，包含以下字段：
+                - running: 是否正在运行
+                - start_time: 开始时间
+                - end_time: 预计结束时间
+                - remaining_time: 剩余时间（秒）
+                - messages_forwarded: 已转发的消息数量
+                - channel_pairs: 监听的频道对
+                - errors: 错误统计
         """
         pass 

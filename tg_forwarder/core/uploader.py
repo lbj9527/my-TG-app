@@ -789,4 +789,223 @@ class Uploader(UploaderInterface):
             
         except Exception as e:
             self._logger.error(f"清理临时文件失败: {str(e)}", exc_info=True)
-            return deleted_count 
+            return deleted_count
+    
+    async def upload_files(self, upload_config: Dict[str, Any] = None) -> Dict[str, Any]:
+        """
+        上传本地文件到目标频道
+        
+        Args:
+            upload_config: 上传配置，为None时使用默认配置
+            
+        Returns:
+            Dict[str, Any]: 上传结果，包含成功和失败的上传信息
+        """
+        if not self._initialized:
+            await self.initialize()
+            
+        # 使用默认配置或合并提供的配置
+        if upload_config is None:
+            upload_config = self._config.get_upload_config()
+        else:
+            default_config = self._config.get_upload_config()
+            # 合并配置，优先使用提供的配置
+            for key, value in default_config.items():
+                if key not in upload_config:
+                    upload_config[key] = value
+                    
+        self._logger.info(f"开始上传文件，配置：{upload_config}")
+        
+        result = {
+            "success": [],
+            "failed": [],
+            "skipped": [],
+            "total_uploads": 0
+        }
+        
+        try:
+            # 获取目标频道
+            target_channels = upload_config.get("target_channels", [])
+            if not target_channels:
+                self._logger.error("上传配置中没有指定目标频道")
+                return {
+                    "success": False,
+                    "error": "上传配置中没有指定目标频道",
+                    "detail": upload_config
+                }
+                
+            # 获取其他配置
+            upload_directory = upload_config.get("directory", "uploads")
+            remove_captions = upload_config.get("remove_captions", False)
+            verify_before_upload = upload_config.get("verify_before_upload", True)
+            limit = upload_config.get("limit", 500)
+            pause_time = upload_config.get("pause_time", 300)
+            
+            # 检查上传目录
+            if not os.path.exists(upload_directory):
+                self._logger.error(f"上传目录不存在: {upload_directory}")
+                return {
+                    "success": False,
+                    "error": f"上传目录不存在: {upload_directory}",
+                    "detail": upload_config
+                }
+                
+            # 获取目录中的所有子文件夹（每个子文件夹作为一个媒体组）
+            media_groups = []
+            for dir_name in os.listdir(upload_directory):
+                dir_path = os.path.join(upload_directory, dir_name)
+                if os.path.isdir(dir_path):
+                    # 获取文件夹中的所有文件
+                    files = []
+                    for file_name in os.listdir(dir_path):
+                        file_path = os.path.join(dir_path, file_name)
+                        if os.path.isfile(file_path) and self._is_valid_media_file(file_path):
+                            files.append({
+                                "path": file_path,
+                                "name": file_name,
+                            })
+                    
+                    if files:
+                        # 文件夹名称作为媒体组的caption
+                        caption = None if remove_captions else dir_name
+                        media_groups.append({
+                            "id": dir_name,
+                            "caption": caption,
+                            "files": files
+                        })
+            
+            # 处理每个目标频道
+            for target_channel in target_channels:
+                # 解析频道标识符
+                chat = await self._client.get_chat(target_channel)
+                if not chat:
+                    self._logger.error(f"无法获取频道信息: {target_channel}")
+                    result["failed"].append({
+                        "channel": target_channel,
+                        "reason": "无法获取频道信息" 
+                    })
+                    continue
+                    
+                chat_id = chat.id
+                
+                # 处理每个媒体组
+                for group in media_groups:
+                    if result["total_uploads"] >= limit:
+                        self._logger.info(f"已达到上传限制({limit})，暂停{pause_time}秒")
+                        await asyncio.sleep(pause_time)
+                        result["total_uploads"] = 0  # 重置计数
+                        
+                    # 准备批次数据
+                    batch_data = {
+                        "target_chat_id": chat_id,
+                        "files": [],
+                        "options": {
+                            "remove_captions": remove_captions,
+                            "verify_before_upload": verify_before_upload
+                        }
+                    }
+                    
+                    # 收集媒体组中的文件
+                    group_files = []
+                    for file_data in group["files"]:
+                        file_path = file_data["path"]
+                        
+                        # 检查是否已上传
+                        is_uploaded = await self._is_file_uploaded(file_path, chat_id)
+                        if is_uploaded:
+                            result["skipped"].append({
+                                "file": file_path,
+                                "channel": target_channel,
+                                "reason": "文件已上传"
+                            })
+                            continue
+                            
+                        # 确定媒体类型
+                        media_type = self._guess_media_type(file_path)
+                        
+                        # 添加到批次
+                        batch_data["files"].append({
+                            "task_id": f"{target_channel}_{os.path.basename(file_path)}",
+                            "file_path": file_path,
+                            "media_type": media_type,
+                            "caption": group["caption"] if batch_data["files"] else None,  # 只给第一个文件添加说明
+                            "group_id": group["id"]
+                        })
+                        
+                        group_files.append(file_path)
+                        
+                    if batch_data["files"]:
+                        # 上传批次
+                        batch_result = await self.upload_batch(batch_data)
+                        
+                        # 合并结果
+                        result["success"].extend(batch_result.get("success", []))
+                        result["failed"].extend(batch_result.get("failed", []))
+                        result["total_uploads"] += len(batch_result.get("success", []))
+                        
+                        self._logger.info(f"媒体组 {group['id']} 上传完成，成功: {len(batch_result.get('success', []))}, 失败: {len(batch_result.get('failed', []))}")
+                    else:
+                        self._logger.info(f"媒体组 {group['id']} 没有可上传的文件")
+            
+            return result
+            
+        except Exception as e:
+            self._logger.error(f"上传文件失败: {str(e)}", exc_info=True)
+            return {
+                "success": False,
+                "error": str(e),
+                "detail": {
+                    "success": result["success"],
+                    "failed": result["failed"],
+                    "skipped": result["skipped"],
+                    "total_uploads": result["total_uploads"]
+                }
+            }
+            
+    def _is_valid_media_file(self, file_path: str) -> bool:
+        """
+        检查文件是否为有效的媒体文件
+        
+        Args:
+            file_path: 文件路径
+            
+        Returns:
+            bool: 是否为有效的媒体文件
+        """
+        # 检查文件是否存在
+        if not os.path.exists(file_path):
+            return False
+            
+        # 获取文件扩展名
+        ext = os.path.splitext(file_path)[1].lower()
+        
+        # 支持的媒体文件扩展名
+        valid_extensions = [
+            # 图片
+            '.jpg', '.jpeg', '.png', '.webp', '.gif', 
+            # 视频
+            '.mp4', '.avi', '.mov', '.mkv', '.webm', 
+            # 文档
+            '.pdf', '.doc', '.docx', '.xls', '.xlsx', '.ppt', '.pptx', '.txt',
+            # 音频
+            '.mp3', '.ogg', '.m4a', '.flac', '.wav',
+            # 压缩文件
+            '.zip', '.rar', '.7z', '.tar', '.gz'
+        ]
+        
+        return ext in valid_extensions
+        
+    async def _is_file_uploaded(self, file_path: str, chat_id: Union[int, str]) -> bool:
+        """
+        检查文件是否已上传到指定频道
+        
+        Args:
+            file_path: 文件路径
+            chat_id: 目标频道ID
+            
+        Returns:
+            bool: 是否已上传
+        """
+        key = f"uploaded:{chat_id}:{os.path.basename(file_path)}"
+        data = self._storage.retrieve("uploads", key)
+        return data is not None 

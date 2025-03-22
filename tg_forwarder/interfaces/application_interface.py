@@ -13,9 +13,10 @@ from tg_forwarder.interfaces.uploader_interface import UploaderInterface
 from tg_forwarder.interfaces.forwarder_interface import ForwarderInterface
 from tg_forwarder.interfaces.config_interface import ConfigInterface
 from tg_forwarder.interfaces.status_tracker_interface import StatusTrackerInterface
-from tg_forwarder.interfaces.task_manager_interface import TaskManagerInterface
 from tg_forwarder.interfaces.storage_interface import StorageInterface
 from tg_forwarder.interfaces.logger_interface import LoggerInterface
+from tg_forwarder.interfaces.json_storage_interface import JsonStorageInterface
+from tg_forwarder.interfaces.history_tracker_interface import HistoryTrackerInterface
 
 
 class ApplicationInterface(ABC):
@@ -100,32 +101,44 @@ class ApplicationInterface(ABC):
         pass
     
     @abstractmethod
-    def get_task_manager(self) -> TaskManagerInterface:
-        """
-        获取任务管理器实例
-        
-        Returns:
-            TaskManagerInterface: 任务管理器接口实例
-        """
-        pass
-    
-    @abstractmethod
     def get_storage(self) -> StorageInterface:
         """
         获取存储实例
         
         Returns:
             StorageInterface: 存储接口实例
+            
+        @deprecated: 此方法将在未来版本中被移除。请使用get_json_storage和get_history_tracker替代。
+        """
+        pass
+    
+    @abstractmethod
+    def get_json_storage(self) -> JsonStorageInterface:
+        """
+        获取JSON存储实例
+        
+        Returns:
+            JsonStorageInterface: JSON存储接口实例
+        """
+        pass
+    
+    @abstractmethod
+    def get_history_tracker(self) -> HistoryTrackerInterface:
+        """
+        获取历史记录跟踪器实例
+        
+        Returns:
+            HistoryTrackerInterface: 历史记录跟踪接口实例
         """
         pass
     
     @abstractmethod
     def get_logger(self) -> LoggerInterface:
         """
-        获取日志器实例
+        获取日志记录器实例
         
         Returns:
-            LoggerInterface: 日志接口实例
+            LoggerInterface: 日志记录器接口实例
         """
         pass
     
@@ -183,32 +196,6 @@ class ApplicationInterface(ABC):
         pass
     
     @abstractmethod
-    async def backup_data(self, backup_path: Optional[str] = None) -> Dict[str, Any]:
-        """
-        备份应用数据
-        
-        Args:
-            backup_path: 备份路径，为None时使用默认路径
-            
-        Returns:
-            Dict[str, Any]: 备份结果
-        """
-        pass
-    
-    @abstractmethod
-    async def restore_data(self, backup_path: str) -> Dict[str, Any]:
-        """
-        恢复应用数据
-        
-        Args:
-            backup_path: 备份路径
-            
-        Returns:
-            Dict[str, Any]: 恢复结果
-        """
-        pass
-    
-    @abstractmethod
     async def health_check(self) -> Dict[str, Any]:
         """
         执行应用健康检查
@@ -240,5 +227,88 @@ class ApplicationInterface(ABC):
             
         Returns:
             bool: 是否成功注销
+        """
+        pass
+    
+    @abstractmethod
+    async def download_messages(self, download_config: Dict[str, Any] = None) -> Dict[str, Any]:
+        """
+        下载消息和媒体
+        
+        Args:
+            download_config: 下载配置，为None时使用默认配置
+            
+        Returns:
+            Dict[str, Any]: 下载结果
+        """
+        pass
+    
+    @abstractmethod
+    async def upload_files(self, upload_config: Dict[str, Any] = None) -> Dict[str, Any]:
+        """
+        上传本地文件到目标频道
+        
+        Args:
+            upload_config: 上传配置，为None时使用默认配置
+            
+        Returns:
+            Dict[str, Any]: 上传结果
+        """
+        pass
+    
+    @abstractmethod
+    async def start_monitor(self, monitor_config: Dict[str, Any] = None) -> Dict[str, Any]:
+        """
+        启动监听服务，实时监听源频道的新消息并转发到目标频道
+        
+        Args:
+            monitor_config: 监听配置，为None时使用默认配置。配置应包含：
+                - channel_pairs: 源频道与目标频道的映射关系
+                - duration: 监听时长，格式为"年-月-日-时"，如"2025-3-28-1"
+                - remove_captions: 是否移除原始字幕
+                - media_types: 要转发的媒体类型列表
+                - forward_delay: 转发延迟（秒）
+                - max_retries: 失败后最大重试次数
+                - message_filter: 消息过滤器表达式
+            
+        Returns:
+            Dict[str, Any]: 启动结果，包含以下字段：
+                - success: 是否成功启动
+                - error: 如果失败，包含错误信息
+                - monitor_id: 监听任务ID
+                - start_time: 开始时间
+                - end_time: 预计结束时间（根据duration计算）
+        """
+        pass
+    
+    @abstractmethod
+    async def stop_monitor(self) -> Dict[str, Any]:
+        """
+        停止监听服务
+        
+        Returns:
+            Dict[str, Any]: 停止结果，包含以下字段：
+                - success: 是否成功停止
+                - error: 如果失败，包含错误信息
+                - monitor_id: 监听任务ID
+                - duration: 实际监听时长（秒）
+                - messages_forwarded: 已转发的消息数量
+        """
+        pass
+    
+    @abstractmethod
+    def get_monitor_status(self) -> Dict[str, Any]:
+        """
+        获取监听服务状态
+        
+        Returns:
+            Dict[str, Any]: 监听服务状态信息，包含以下字段：
+                - running: 是否正在运行
+                - start_time: 开始时间
+                - end_time: 预计结束时间
+                - remaining_time: 剩余时间（秒）
+                - messages_forwarded: 已转发的消息数量
+                - channel_pairs: 监听的频道对
+                - errors: 错误统计
         """
         pass 
