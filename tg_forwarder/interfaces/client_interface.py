@@ -111,4 +111,18 @@ class TelegramClientInterface(ABC):
         Returns:
             List[Message]: 媒体组中的所有消息
         """
+        pass
+    
+    @abstractmethod
+    async def get_chat_member(self, chat_id: Union[str, int], user_id: Union[str, int]) -> Optional[Any]:
+        """
+        获取指定聊天中的成员信息
+        
+        Args:
+            chat_id: 聊天或频道的ID
+            user_id: 用户ID或用户名
+            
+        Returns:
+            Any: 成员信息，如果获取失败则返回None
+        """
         pass 

@@ -292,10 +292,17 @@ class ConfigManager(ConfigInterface):
         """
         forward_config = self.get('forward', {})
         
-        # 确保channel_pairs存在
-        if 'channel_pairs' not in forward_config or not forward_config['channel_pairs']:
-            channel_pairs = self.get_channel_pairs()
-            forward_config['channel_pairs'] = channel_pairs
+        # 处理新字段 forward_channel_pairs，将数组结构转换为字典结构
+        channel_pairs = {}
+        forward_channel_pairs = forward_config.get('forward_channel_pairs', [])
+        for pair in forward_channel_pairs:
+            source = pair.get('source_channel')
+            targets = pair.get('target_channels', [])
+            if source and targets:
+                channel_pairs[source] = targets
+        
+        # 设置channel_pairs
+        forward_config['channel_pairs'] = channel_pairs
             
         # 确保必要的参数存在，用默认值补全
         defaults = {
@@ -381,20 +388,37 @@ class ConfigManager(ConfigInterface):
             Dict[str, Any]: 监听配置字典，包含channel_pairs、duration、forward_delay等参数
         """
         monitor_config = self.get('monitor', {})
-        if not monitor_config:
-            # 使用转发配置中的channel_pairs或提供默认配置
-            channel_pairs = self.get_channel_pairs()
-            return {
-                'channel_pairs': channel_pairs,
-                'remove_captions': True,
-                'media_types': ['photo', 'video', 'document', 'audio', 'animation'],
-                'duration': '2025-3-28-1',  # 默认监听到2025年3月28日1点
-                'forward_delay': 2,
-                'max_retries': 3,
-                'message_filter': '',
-                'add_watermark': False,
-                'watermark_text': ''
-            }
+        
+        # 处理新字段 monitor_channel_pairs，将数组结构转换为字典结构
+        channel_pairs = {}
+        monitor_channel_pairs = monitor_config.get('monitor_channel_pairs', [])
+        for pair in monitor_channel_pairs:
+            source = pair.get('source_channel')
+            targets = pair.get('target_channels', [])
+            if source and targets:
+                channel_pairs[source] = targets
+        
+        # 设置channel_pairs
+        monitor_config['channel_pairs'] = channel_pairs
+        
+        # 确保必要的默认配置存在
+        if not monitor_config.get('duration'):
+            monitor_config['duration'] = '2025-3-28-1'  # 默认监听到2025年3月28日1点
+        if not monitor_config.get('remove_captions'):
+            monitor_config['remove_captions'] = True
+        if not monitor_config.get('media_types'):
+            monitor_config['media_types'] = ['photo', 'video', 'document', 'audio', 'animation']
+        if not monitor_config.get('forward_delay'):
+            monitor_config['forward_delay'] = 2
+        if not monitor_config.get('max_retries'):
+            monitor_config['max_retries'] = 3
+        if not monitor_config.get('message_filter'):
+            monitor_config['message_filter'] = ''
+        if not monitor_config.get('add_watermark'):
+            monitor_config['add_watermark'] = False
+        if not monitor_config.get('watermark_text'):
+            monitor_config['watermark_text'] = ''
+                
         return monitor_config
     
     def get_storage_config(self) -> Dict[str, Any]:
@@ -419,28 +443,15 @@ class ConfigManager(ConfigInterface):
         Returns:
             Dict[str, List[Union[str, int]]]: 源频道到目标频道的映射字典
         """
-        # 首先尝试从forward部分读取channel_pairs
-        pairs = self.get('forward.channel_pairs', {})
-        if not pairs:
-            # 如果forward部分没有，尝试直接读取顶层的channel_pairs
-            pairs = self.get('channel_pairs', {})
-            
         result = {}
         
-        # 处理配置文件中的频道对，确保每个源频道映射到一个目标频道列表
-        for source_channel, target_channels in pairs.items():
-            # 忽略无效的源频道
-            if not source_channel:
-                continue
-                
-            # 确保目标频道是一个列表
-            if isinstance(target_channels, (str, int)):
-                result[source_channel] = [target_channels]
-            elif isinstance(target_channels, list):
-                result[source_channel] = target_channels
-            else:
-                # 忽略无效的目标频道配置
-                continue
+        # 从forward部分读取新的forward_channel_pairs
+        forward_channel_pairs = self.get('forward.forward_channel_pairs', [])
+        for pair in forward_channel_pairs:
+            source = pair.get('source_channel')
+            targets = pair.get('target_channels', [])
+            if source and targets:
+                result[source] = targets
                 
         return result
     
@@ -505,34 +516,37 @@ class ConfigManager(ConfigInterface):
             errors.setdefault('telegram.api_hash', []).append("API Hash不能为空")
         
         # 验证频道配对配置
-        # 首先检查forward部分的channel_pairs
         forward_section = self.config.get('forward', {})
-        forward_channel_pairs = forward_section.get('channel_pairs', {})
         
-        # 然后检查顶层的channel_pairs
-        top_level_channel_pairs = self.config.get('channel_pairs', {})
-        
-        # 合并两个配置源
-        channel_pairs = forward_channel_pairs or top_level_channel_pairs
-        
-        if not channel_pairs:
-            errors.setdefault('channel_pairs', []).append("频道配对不能为空，至少需要一对源频道到目标频道的映射")
-        
-        # 检查每个配对的有效性
-        valid_pairs = False
-        for source, targets in channel_pairs.items():
-            if not source:
-                continue
+        # 检查forward_channel_pairs配置
+        forward_channel_pairs = forward_section.get('forward_channel_pairs', [])
+        if not forward_channel_pairs:
+            errors.setdefault('forward.forward_channel_pairs', []).append("频道配对不能为空，请配置至少一对源频道到目标频道的映射")
+        else:
+            valid_pairs = False
+            for idx, pair in enumerate(forward_channel_pairs):
+                source = pair.get('source_channel')
+                targets = pair.get('target_channels', [])
                 
-            if not targets:
-                errors.setdefault(f'channel_pairs.{source}', []).append("目标频道列表不能为空")
-                continue
+                if not source:
+                    errors.setdefault(f'forward.forward_channel_pairs[{idx}].source_channel', []).append("源频道不能为空")
+                    continue
+                    
+                if not targets:
+                    errors.setdefault(f'forward.forward_channel_pairs[{idx}].target_channels', []).append("目标频道列表不能为空")
+                    continue
+                    
+                # 发现至少一个有效的配对
+                valid_pairs = True
                 
-            # 发现至少一个有效的配对
-            valid_pairs = True
-            
-        if not valid_pairs and channel_pairs:  # 只有在有channel_pairs但无有效配对时才添加此错误
-            errors.setdefault('channel_pairs', []).append("没有找到有效的频道配对")
+            if not valid_pairs:
+                errors.setdefault('forward.forward_channel_pairs', []).append("没有找到有效的频道配对")
+        
+        # 验证monitor_channel_pairs配置
+        monitor_section = self.config.get('monitor', {})
+        monitor_channel_pairs = monitor_section.get('monitor_channel_pairs', [])
+        if monitor_section and not monitor_channel_pairs:
+            errors.setdefault('monitor.monitor_channel_pairs', []).append("监听配置中缺少频道配对，请配置至少一对源频道到目标频道的映射")
         
         # 验证源频道配置部分
         source_channel_config = self.get('source_channel_config', {})
@@ -548,17 +562,6 @@ class ConfigManager(ConfigInterface):
                 
             if 'limit_messages' in config and (not isinstance(config['limit_messages'], int) or config['limit_messages'] <= 0):
                 errors.setdefault(f'source_channel_config.{source_id}.limit_messages', []).append("消息限制必须是一个正整数")
-        
-        # 向后兼容：如果仍在使用旧的channels配置，也验证它们
-        if 'channels' in self.config:
-            channels_section = self.config.get('channels', {})
-            source_channels = channels_section.get('source_channels', [])
-            if not source_channels:
-                errors.setdefault('channels.source_channels', []).append("使用旧配置格式时，源频道列表不能为空")
-            
-            target_channels = channels_section.get('target_channels', [])
-            if not target_channels:
-                errors.setdefault('channels.target_channels', []).append("使用旧配置格式时，目标频道列表不能为空")
         
         return errors
     

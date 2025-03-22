@@ -4,8 +4,8 @@
 TG Forwarder 应用程序入口点
 提供命令行接口和应用程序启动功能
 
-版本: v0.3.0
-更新日期: 2024-07-31
+版本: v0.3.7
+更新日期: 2024-08-30
 """
 
 import os
@@ -104,17 +104,31 @@ async def forward_messages(args: argparse.Namespace) -> None:
         print(f"开始转发历史消息...")
         print(f"消息ID范围: {forward_config.get('start_id', 0)} - {forward_config.get('end_id', '最新消息')}")
         print(f"消息数量限制: {forward_config.get('limit', '无限制')}")
-        print(f"频道配对: {len(forward_config.get('channel_pairs', {}))}对")
+        
+        # 显示频道配对数量
+        channel_pairs = forward_config.get('channel_pairs', {})
+        print(f"频道配对: {len(channel_pairs)}对")
         
         # 开始转发
         forwarder = app.get_forwarder()
         if forwarder is None:
-            print("错误: 转发器初始化失败。请检查配置文件中的channel_pairs是否正确设置。")
-            print("channel_pairs应该包含源频道到目标频道的映射，例如:")
-            print('  "channel_pairs": {')
-            print('    "https://t.me/source_channel": ["https://t.me/target1", "https://t.me/target2"]')
-            print('  }')
+            print("错误: 转发器初始化失败。请检查配置文件中的forward_channel_pairs是否正确设置。")
+            print("配置格式示例:")
+            print('  "forward_channel_pairs": [')
+            print('    {')
+            print('      "source_channel": "https://t.me/source_channel",')
+            print('      "target_channels": ["https://t.me/target1", "https://t.me/target2"]')
+            print('    }')
+            print('  ]')
             return
+        
+        # 获取客户端并确保它传递给频道工具实例
+        client = app.get_client()
+        if client:
+            # 从app获取channel_utils
+            channel_utils = app.get_channel_utils()
+            # 设置客户端
+            channel_utils.set_client(client)
             
         result = await forwarder.start_forwarding(forward_config=forward_config)
         
@@ -165,6 +179,14 @@ async def download_messages(args: argparse.Namespace) -> None:
             print('    "directory": "downloads"')
             print('  }')
             return
+        
+        # 获取客户端并确保它传递给频道工具实例
+        client = app.get_client()
+        if client:
+            # 从app获取channel_utils
+            channel_utils = app.get_channel_utils()
+            # 设置客户端
+            channel_utils.set_client(client)
             
         result = await downloader.download_messages(download_config=download_config)
         
@@ -217,6 +239,14 @@ async def upload_files(args: argparse.Namespace) -> None:
             print('  }')
             return
             
+        # 获取客户端并确保它传递给频道工具实例
+        client = app.get_client()
+        if client:
+            # 从app获取channel_utils
+            channel_utils = app.get_channel_utils()
+            # 设置客户端
+            channel_utils.set_client(client)
+            
         result = await app.upload_files(upload_config)
         
         if isinstance(result, dict) and result.get("success", False):
@@ -250,13 +280,17 @@ async def start_monitor(args: argparse.Namespace) -> None:
         config = app.get_config()
         monitor_config = config.get_monitor_config()
         
+        # 检查channel_pairs，它应该已经被ConfigManager从monitor_channel_pairs转换过来
         if not monitor_config.get("channel_pairs"):
-            print("错误: 监听配置中缺少频道配对。请检查配置文件中的monitor.channel_pairs设置。")
-            print("监听配置应包含channel_pairs映射，例如:")
+            print("错误: 监听配置中缺少频道配对。请检查配置文件中的monitor_channel_pairs设置。")
+            print("配置格式示例:")
             print('  "monitor": {')
-            print('    "channel_pairs": {')
-            print('      "https://t.me/source_channel": ["https://t.me/target1", "https://t.me/target2"]')
-            print('    },')
+            print('    "monitor_channel_pairs": [')
+            print('      {')
+            print('        "source_channel": "https://t.me/source_channel",')
+            print('        "target_channels": ["https://t.me/target1", "https://t.me/target2"]')
+            print('      }')
+            print('    ],')
             print('    "duration": "2025-3-28-1"')
             print('  }')
             return
@@ -267,6 +301,12 @@ async def start_monitor(args: argparse.Namespace) -> None:
         
         # 获取频道工具实例进行频道验证
         channel_utils = app.get_channel_utils()
+        
+        # 获取客户端并确保它传递给频道工具实例
+        client = app.get_client()
+        if client:
+            # 设置客户端
+            channel_utils.set_client(client)
         
         print("正在验证频道配置...")
         

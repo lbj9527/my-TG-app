@@ -331,7 +331,13 @@ class Application(ApplicationInterface):
                         try:
                             close_method = getattr(component, method_name, None)
                             if close_method is not None and callable(close_method):
-                                close_method()
+                                # 检查方法是否为协程方法
+                                if asyncio.iscoroutinefunction(close_method):
+                                    # 如果是协程方法，使用await
+                                    await close_method()
+                                else:
+                                    # 如果不是协程方法，直接调用
+                                    close_method()
                                 self._app_logger.debug(f"{component_name}已关闭")
                         except Exception as component_error:
                             self._app_logger.error(f"关闭{component_name}时出错: {str(component_error)}")
@@ -379,7 +385,13 @@ class Application(ApplicationInterface):
                     self._app_logger.debug(f"正在关闭{component_name}...")
                     close_method = getattr(component, method_name, None)
                     if close_method is not None and callable(close_method):
-                        close_method()
+                        # 检查方法是否为协程方法
+                        if asyncio.iscoroutinefunction(close_method):
+                            # 如果是协程方法，使用await
+                            await close_method()
+                        else:
+                            # 如果不是协程方法，直接调用
+                            close_method()
                     self._app_logger.debug(f"{component_name}已关闭")
                 except Exception as e:
                     self._app_logger.error(f"关闭{component_name}时出错: {str(e)}")
@@ -586,11 +598,23 @@ class Application(ApplicationInterface):
                 component = getattr(self, f"_{component_name}")
                 if component:
                     if hasattr(component, "shutdown"):
-                        await component.shutdown()
+                        close_method = getattr(component, "shutdown")
+                        if asyncio.iscoroutinefunction(close_method):
+                            await close_method()
+                        else:
+                            close_method()
                     elif hasattr(component, "disconnect"):
-                        await component.disconnect()
+                        close_method = getattr(component, "disconnect")
+                        if asyncio.iscoroutinefunction(close_method):
+                            await close_method()
+                        else:
+                            close_method()
                     elif hasattr(component, "close"):
-                        await component.close()
+                        close_method = getattr(component, "close")
+                        if asyncio.iscoroutinefunction(close_method):
+                            await close_method()
+                        else:
+                            close_method()
                 
                 results[component_name] = True
             
@@ -1163,5 +1187,10 @@ class Application(ApplicationInterface):
             ChannelUtilsInterface: 频道工具接口实例
         """
         # 使用核心层的工厂函数获取或创建全局频道工具实例
-        channel_utils = get_channel_utils(self._client)
-        return channel_utils 
+        from tg_forwarder.core.channel_factory import get_channel_utils
+        
+        # 传递客户端到频道工具实例
+        if self._client:
+            return get_channel_utils(self._client)
+        
+        return get_channel_utils() 

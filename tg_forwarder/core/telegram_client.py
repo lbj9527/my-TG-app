@@ -355,6 +355,38 @@ class TelegramClient(TelegramClientInterface):
             self._logger.error(f"获取媒体组失败: {str(e)}")
             return []
     
+    async def get_chat_member(self, chat_id: Union[str, int], user_id: Union[str, int]) -> Optional[Any]:
+        """
+        获取指定聊天中的成员信息
+        
+        Args:
+            chat_id: 聊天或频道的ID
+            user_id: 用户ID或用户名
+            
+        Returns:
+            Any: 成员信息，如果获取失败则返回None
+        """
+        if not self._connected:
+            await self.connect()
+            
+        try:
+            chat_member = await self._client.get_chat_member(chat_id, user_id)
+            return chat_member
+        except FloodWait as e:
+            self._logger.warning(f"获取聊天成员时触发FloodWait: {e.value}秒")
+            if self._flood_wait_retries < self._max_flood_wait_retries:
+                self._flood_wait_retries += 1
+                self._logger.info(f"等待 {e.value} 秒后重试 (重试 {self._flood_wait_retries}/{self._max_flood_wait_retries})...")
+                await asyncio.sleep(e.value)
+                return await self.get_chat_member(chat_id, user_id)
+            else:
+                self._logger.error(f"获取聊天成员失败: 超过最大重试次数")
+                self._flood_wait_retries = 0
+                return None
+        except Exception as e:
+            self._logger.error(f"获取聊天成员失败: {str(e)}")
+            return None
+    
     async def send_message(self, chat_id: Union[str, int], text: str, **kwargs) -> Optional[Message]:
         """
         发送文本消息

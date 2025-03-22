@@ -160,25 +160,28 @@ class ChannelUtils(ChannelUtilsInterface):
                     return False, "无法获取频道信息"
                 
                 # 检查是否有发送消息的权限
-                if hasattr(chat, 'permissions'):
+                if hasattr(chat, 'permissions') and chat.permissions is not None:
                     if not chat.permissions.can_send_messages:
                         return False, "您在该频道没有发送消息的权限"
                 
                 # 检查是否有管理员权限
                 try:
                     member = await self._client.get_chat_member(chat.id, "me")
-                    if hasattr(member, 'can_post_messages') and not member.can_post_messages:
-                        return False, "您在该频道没有发布消息的权限"
-                    
-                    # 如果可以管理消息，则有权限
-                    if hasattr(member, 'can_delete_messages') and member.can_delete_messages:
-                        return True, "您有管理员权限，可以转发到该频道"
+                    if member is not None:
+                        if hasattr(member, 'can_post_messages') and not member.can_post_messages:
+                            return False, "您在该频道没有发布消息的权限"
                         
+                        # 如果可以管理消息，则有权限
+                        if hasattr(member, 'can_delete_messages') and member.can_delete_messages:
+                            return True, "您有管理员权限，可以转发到该频道"
+                            
+                    # 如果无法获取具体权限，但已经验证了频道存在，默认允许转发
                     return True, "允许转发到此频道"
                     
                 except Exception as e:
                     logger.error(f"检查频道成员权限时出错: {str(e)}")
-                    return False, f"检查权限时出错: {str(e)}"
+                    # 如果无法确认权限，但频道已验证存在，默认允许转发
+                    return True, "无法详细检查权限，但频道可访问"
                 
             except FloodWait as e:
                 await asyncio.sleep(e.x)
@@ -338,7 +341,7 @@ class ChannelUtils(ChannelUtilsInterface):
                 
         # 获取新数据
         try:
-            chat = await self._client.get_chat(channel_id)
+            chat = await self._client.get_entity(channel_id)
             
             # 更新缓存
             self._chat_cache[channel_id] = {'chat': chat}
