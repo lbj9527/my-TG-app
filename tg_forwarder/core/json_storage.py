@@ -353,30 +353,120 @@ class JsonStorage(JsonStorageInterface):
     
     def parse_datetime(self, dt_str: str) -> Optional[datetime]:
         """
-        解析ISO 8601格式字符串为日期时间对象
+        解析时间字符串为datetime对象
         
         Args:
-            dt_str: 日期时间字符串
+            dt_str: 时间字符串，支持ISO8601格式
             
         Returns:
-            Optional[datetime]: 解析的日期时间对象，解析失败则返回None
+            Optional[datetime]: 解析后的datetime对象，失败时返回None
         """
         try:
-            # 尝试解析不同格式的ISO 8601日期时间字符串
-            if 'T' in dt_str:
-                # 标准ISO格式，包含T分隔符
-                if '.' in dt_str:
-                    # 包含毫秒
-                    if dt_str.endswith('Z'):
-                        # UTC时间
-                        dt_str = dt_str[:-1]  # 移除Z后缀
-                    return datetime.fromisoformat(dt_str)
-                else:
-                    # 不包含毫秒
-                    return datetime.fromisoformat(dt_str)
-            else:
-                # 尝试其他可能的格式
+            # 尝试解析ISO8601格式
+            return datetime.fromisoformat(dt_str.replace('Z', '+00:00'))
+        except (ValueError, AttributeError):
+            try:
+                # 尝试解析没有时区信息的格式
                 return datetime.fromisoformat(dt_str)
-        except (ValueError, TypeError) as e:
-            self.logger.error(f"解析日期时间字符串失败: {dt_str}, 错误: {str(e)}")
-            return None 
+            except (ValueError, AttributeError):
+                self.logger.error(f"无法解析时间字符串: {dt_str}")
+                return None
+    
+    def query_data(self, collection_name: str, query: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """
+        查询JSON文件中的数据（兼容旧接口）
+        
+        Args:
+            collection_name: 集合名称，对应文件名前缀
+            query: 查询条件
+        
+        Returns:
+            List[Dict[str, Any]]: 查询结果列表，失败或无匹配时返回空列表
+        """
+        self.logger.warning("使用了已废弃的 query_data 方法，请迁移到新的 JSON 存储 API")
+        
+        try:
+            # 构建文件路径
+            file_path = f"{collection_name}.json"
+            
+            # 加载数据
+            data = self.load_json(file_path)
+            if not data:
+                return []
+            
+            # 将数据扁平化为列表
+            results = []
+            if isinstance(data, dict):
+                # 如果是字典，尝试将所有值作为记录
+                for key, value in data.items():
+                    if isinstance(value, dict):
+                        # 将键添加到值中
+                        record = {"key": key, **value}
+                        results.append(record)
+            
+            # 返回所有记录，不做过滤（简化实现）
+            # 注意：这里不实现完整的 MongoDB 风格查询，只是返回所有数据
+            return results
+        except Exception as e:
+            self.logger.error(f"查询数据失败: {collection_name}, 错误: {str(e)}")
+            return []
+    
+    def get_data(self, collection_name: str, key: str) -> Optional[Dict[str, Any]]:
+        """
+        获取指定键的数据（兼容旧接口）
+        
+        Args:
+            collection_name: 集合名称，对应文件名前缀
+            key: 数据键
+        
+        Returns:
+            Optional[Dict[str, Any]]: 对应键的数据，不存在或失败时返回None
+        """
+        self.logger.warning("使用了已废弃的 get_data 方法，请迁移到新的 JSON 存储 API")
+        
+        try:
+            # 构建文件路径
+            file_path = f"{collection_name}.json"
+            
+            # 加载数据
+            data = self.load_json(file_path)
+            if not data or not isinstance(data, dict):
+                return None
+            
+            # 检查键是否存在
+            return data.get(key)
+        except Exception as e:
+            self.logger.error(f"获取数据失败: {collection_name}/{key}, 错误: {str(e)}")
+            return None
+    
+    def store_data(self, collection_name: str, key: str, value: Dict[str, Any]) -> bool:
+        """
+        存储数据（兼容旧接口）
+        
+        Args:
+            collection_name: 集合名称，对应文件名前缀
+            key: 数据键
+            value: 要存储的数据
+        
+        Returns:
+            bool: 存储是否成功
+        """
+        self.logger.warning("使用了已废弃的 store_data 方法，请迁移到新的 JSON 存储 API")
+        
+        try:
+            # 构建文件路径
+            file_path = f"{collection_name}.json"
+            
+            # 加载现有数据
+            data = self.load_json(file_path)
+            if not isinstance(data, dict):
+                data = {}
+            
+            # 更新数据
+            data[key] = value
+            
+            # 保存数据
+            return self.save_json(file_path, data)
+        except Exception as e:
+            self.logger.error(f"存储数据失败: {collection_name}/{key}, 错误: {str(e)}")
+            return False 

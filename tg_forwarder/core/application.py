@@ -20,14 +20,13 @@ from tg_forwarder.interfaces.uploader_interface import UploaderInterface
 from tg_forwarder.interfaces.forwarder_interface import ForwarderInterface
 from tg_forwarder.interfaces.config_interface import ConfigInterface
 from tg_forwarder.interfaces.status_tracker_interface import StatusTrackerInterface
-from tg_forwarder.interfaces.storage_interface import StorageInterface
 from tg_forwarder.interfaces.logger_interface import LoggerInterface
 from tg_forwarder.interfaces.json_storage_interface import JsonStorageInterface
 from tg_forwarder.interfaces.history_tracker_interface import HistoryTrackerInterface
+from tg_forwarder.interfaces.channel_utils_interface import ChannelUtilsInterface
 
 from tg_forwarder.core.config_manager import ConfigManager
 from tg_forwarder.core.logger import Logger
-from tg_forwarder.core.storage import Storage
 from tg_forwarder.core.status_tracker import StatusTracker
 from tg_forwarder.core.telegram_client import TelegramClient
 from tg_forwarder.core.downloader import Downloader
@@ -35,6 +34,8 @@ from tg_forwarder.core.uploader import Uploader
 from tg_forwarder.core.forwarder import Forwarder
 from tg_forwarder.core.json_storage import JsonStorage
 from tg_forwarder.core.history_tracker import HistoryTracker
+from tg_forwarder.core.channel_utils import ChannelUtils
+from tg_forwarder.core.channel_factory import get_channel_utils
 
 
 class Application(ApplicationInterface):
@@ -44,7 +45,7 @@ class Application(ApplicationInterface):
     """
     
     # 应用程序版本
-    VERSION = "0.2.8"
+    VERSION = "0.3.2"
     
     # 添加一个全局的应用程序实例引用，用于信号处理
     _instance = None
@@ -144,7 +145,6 @@ class Application(ApplicationInterface):
         self._start_time = 0
         
         # 组件实例
-        self._storage = None
         self._json_storage = None
         self._history_tracker = None
         self._status_tracker = None
@@ -229,39 +229,22 @@ class Application(ApplicationInterface):
                 if not self._logger:
                     self._logger = None
             
-            # 初始化旧存储系统（后续将移除）
-            try:
-                self._storage = self._json_storage
-                self._app_logger.info("使用JsonStorage作为存储系统")
-            except Exception as e:
-                self._app_logger.error(f"初始化存储系统失败: {str(e)}")
-                return False
-            
             # 初始化状态追踪器
-            self._status_tracker = StatusTracker(self._storage, self._logger)
+            self._status_tracker = StatusTracker(self._json_storage, self._logger)
             await self._status_tracker.initialize()
             
             # 通过配置初始化Telegram客户端
             try:
                 if self._config_valid:
-                    api_id = self._config.get_telegram_api_id()
-                    api_hash = self._config.get_telegram_api_hash()
-                    session_name = self._config.get_session_name()
-                    
-                    # 初始化客户端
+                    # 初始化客户端（只需要传递config和logger两个参数）
                     self._client = TelegramClient(
-                        api_id,
-                        api_hash,
-                        session_name,
-                        self._logger,
-                        self._config
+                        self._config,
+                        self._logger
                     )
                     
                     # 连接客户端
-                    if not await self._client.connect():
-                        self._app_logger.error("Telegram客户端连接失败")
-                        return False
-                        
+                    await self._client.connect()
+                    
                     # 添加客户端到全局引用
                     Application._global_client = self._client
                 else:
@@ -279,8 +262,9 @@ class Application(ApplicationInterface):
                     self._client,
                     self._config,
                     self._logger,
-                    self._storage,
-                    self._status_tracker
+                    self._json_storage,
+                    self._status_tracker,
+                    self._history_tracker
                 )
                 await self._downloader.initialize()
                 
@@ -290,12 +274,13 @@ class Application(ApplicationInterface):
                     self._client,
                     self._config,
                     self._logger,
-                    self._storage,
-                    self._status_tracker
+                    self._json_storage,
+                    self._status_tracker,
+                    self._history_tracker
                 )
                 await self._uploader.initialize()
                 
-                # 初始化转发器，移除对task_manager的依赖
+                # 初始化转发器
                 self._forwarder = Forwarder(
                     self._client,
                     self._downloader,
@@ -337,7 +322,6 @@ class Application(ApplicationInterface):
                     (self._downloader, "shutdown", "下载器"),
                     (self._client, "disconnect", "客户端"),
                     (self._status_tracker, "shutdown", "状态追踪器"),
-                    (self._storage, "close", "存储"),
                     (self._history_tracker, "close", "历史记录跟踪器"),
                     (self._json_storage, "close", "JSON存储")
                 ]
@@ -376,7 +360,7 @@ class Application(ApplicationInterface):
         await self._trigger_event("app_shutdown", {})
         
         # 停止转发服务
-        if self._forwarder and await self._forwarder.get_forwarding_status():
+        if self._forwarder and self._forwarder.get_forwarding_status().get('running', False):
             await self.stop_forwarding()
         
         # 按顺序关闭组件
@@ -386,8 +370,6 @@ class Application(ApplicationInterface):
             (self._downloader, "shutdown", "下载器"),
             (self._client, "disconnect", "客户端"),
             (self._status_tracker, "shutdown", "状态追踪器"),
-            (self._storage, "close", "存储"),
-            (self._history_tracker, "close", "历史记录跟踪器"),
             (self._json_storage, "close", "JSON存储")
         ]
         
@@ -466,18 +448,6 @@ class Application(ApplicationInterface):
             StatusTrackerInterface: 状态跟踪器接口实例
         """
         return self._status_tracker
-    
-    def get_storage(self) -> StorageInterface:
-        """
-        获取存储实例（已弃用）
-        
-        Returns:
-            StorageInterface: 存储接口实例
-            
-        Deprecated:
-            该方法已弃用，将在未来版本中移除。请使用 get_json_storage() 和 get_history_tracker() 方法代替。
-        """
-        return self._storage
     
     def get_json_storage(self) -> JsonStorageInterface:
         """
@@ -590,7 +560,7 @@ class Application(ApplicationInterface):
         # 定义所有可重启的组件
         all_components = [
             "client", "downloader", "uploader", "forwarder",
-            "status_tracker", "storage"
+            "status_tracker"
         ]
         
         # 如果未指定组件，重启所有组件
@@ -633,9 +603,6 @@ class Application(ApplicationInterface):
                 
                 if component_name == "client":
                     await self._client.connect()
-                
-                elif component_name == "storage":
-                    await self._storage.initialize()
                 
                 elif component_name == "status_tracker":
                     await self._status_tracker.initialize()
@@ -935,15 +902,6 @@ class Application(ApplicationInterface):
         Returns:
             bool: 存储是否正常
         """
-        # 检查旧存储
-        if self._storage:
-            try:
-                # 尝试执行简单查询测试
-                test_result = await self._storage.query("test")
-            except Exception as e:
-                self._app_logger.warning(f"旧存储检查失败: {e}")
-                # 即使旧存储检查失败，我们仍可能有新存储可用
-        
         # 检查JSON存储
         if not self._json_storage:
             self._app_logger.error("JSON存储组件未初始化")
@@ -1195,4 +1153,15 @@ class Application(ApplicationInterface):
     
     async def register_channel(self, channel_identifier: Union[str, int]) -> Dict[str, Any]:
         # ... existing code ...
-        pass 
+        pass
+    
+    def get_channel_utils(self) -> ChannelUtilsInterface:
+        """
+        获取频道工具实例
+        
+        Returns:
+            ChannelUtilsInterface: 频道工具接口实例
+        """
+        # 使用核心层的工厂函数获取或创建全局频道工具实例
+        channel_utils = get_channel_utils(self._client)
+        return channel_utils 

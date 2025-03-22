@@ -6,10 +6,12 @@
 import os
 import time
 import asyncio
+import logging
 from typing import Dict, Any, List, Union, Optional, Tuple
 from datetime import datetime
 import hashlib
 import json
+import base64
 
 from pyrogram.types import Message
 from pyrogram.errors import FloodWait
@@ -18,8 +20,13 @@ from tg_forwarder.interfaces.downloader_interface import DownloaderInterface
 from tg_forwarder.interfaces.client_interface import TelegramClientInterface
 from tg_forwarder.interfaces.config_interface import ConfigInterface
 from tg_forwarder.interfaces.logger_interface import LoggerInterface
-from tg_forwarder.interfaces.storage_interface import StorageInterface
 from tg_forwarder.interfaces.status_tracker_interface import StatusTrackerInterface
+from tg_forwarder.interfaces.json_storage_interface import JsonStorageInterface
+from tg_forwarder.interfaces.history_tracker_interface import HistoryTrackerInterface
+from tg_forwarder.core.channel_factory import (
+    parse_channel, format_channel, is_channel_valid, get_actual_chat_id, filter_channels
+)
+from tg_forwarder.utils.exceptions import ChannelParseError
 
 
 class Downloader(DownloaderInterface):
@@ -28,9 +35,15 @@ class Downloader(DownloaderInterface):
     负责下载Telegram消息中的媒体内容
     """
     
-    def __init__(self, client: TelegramClientInterface, config: ConfigInterface, 
-                 logger: LoggerInterface, storage: StorageInterface,
-                 status_tracker: StatusTrackerInterface):
+    def __init__(
+        self,
+        client: TelegramClientInterface,
+        config: ConfigInterface,
+        logger: LoggerInterface,
+        json_storage: JsonStorageInterface,
+        status_tracker: StatusTrackerInterface,
+        history_tracker: HistoryTrackerInterface
+    ):
         """
         初始化下载器
         
@@ -38,14 +51,16 @@ class Downloader(DownloaderInterface):
             client: Telegram客户端接口实例
             config: 配置接口实例
             logger: 日志接口实例
-            storage: 存储接口实例
+            json_storage: JSON存储接口实例
             status_tracker: 状态追踪器接口实例
+            history_tracker: 历史记录跟踪器接口实例
         """
         self._client = client
         self._config = config
         self._logger = logger.get_logger("Downloader")
-        self._storage = storage
+        self._json_storage = json_storage
         self._status_tracker = status_tracker
+        self._history_tracker = history_tracker
         
         self._download_path = None
         self._initialized = False
@@ -53,6 +68,18 @@ class Downloader(DownloaderInterface):
         
         # 用于存储已下载消息的集合
         self._downloaded_cache = set()
+        
+        # 下载配置
+        self._default_download_path = "downloads"
+        self._chunk_size = 1048576  # 1MB
+        self._skip_existing = True
+        
+        # 当前下载任务状态
+        self._is_downloading = False
+        self._current_tasks = {}
+        self._download_queue = asyncio.Queue()
+        self._active_downloads = 0
+        self._max_concurrent_downloads = 3
         
     async def initialize(self) -> bool:
         """
@@ -482,7 +509,7 @@ class Downloader(DownloaderInterface):
         # 然后检查存储
         try:
             key = f"downloaded:{chat_id}:{message_id}"
-            data = self._storage.get_data("downloads", key)
+            data = self._json_storage.get_data("downloads", key)
             if data:
                 # 添加到内存缓存
                 self._add_to_downloaded_cache(chat_id, message_id)
@@ -507,7 +534,7 @@ class Downloader(DownloaderInterface):
         """从存储加载已下载消息缓存"""
         try:
             # 从存储中查询所有已下载的消息
-            records = self._storage.query_data("downloads", {"key": {"$regex": "^downloaded:"}})
+            records = self._json_storage.query_data("downloads", {"key": {"$regex": "^downloaded:"}})
             
             # 清空缓存
             self._downloaded_cache.clear()
@@ -535,8 +562,8 @@ class Downloader(DownloaderInterface):
                 key = f"downloaded:{chat_id}:{message_id}"
                 
                 # 检查是否已存在
-                if not self._storage.get_data("downloads", key):
-                    self._storage.store_data("downloads", key, {
+                if not self._json_storage.get_data("downloads", key):
+                    self._json_storage.store_data("downloads", key, {
                         "chat_id": chat_id,
                         "message_id": message_id,
                         "downloaded_at": datetime.now().isoformat()
@@ -592,7 +619,7 @@ class Downloader(DownloaderInterface):
             
             # 存储元数据
             key = f"metadata:{message.chat.id}:{message.id}"
-            self._storage.store_data("downloads", key, metadata)
+            self._json_storage.store_data("downloads", key, metadata)
         except Exception as e:
             self._logger.error(f"存储消息元数据失败: {str(e)}", exc_info=True)
     
@@ -638,6 +665,40 @@ class Downloader(DownloaderInterface):
                     "error": "下载配置中没有指定源频道",
                     "detail": download_config
                 }
+            
+            # 使用新的频道解析功能过滤并验证源频道
+            filtered_channels = filter_channels(source_channels)
+            valid_source_channels = []
+            
+            for channel in filtered_channels:
+                try:
+                    # 验证频道有效性
+                    channel_id, _ = parse_channel(channel)
+                    valid, reason = await is_channel_valid(channel)
+                    
+                    if valid:
+                        valid_source_channels.append(channel)
+                        self._logger.info(f"源频道 {format_channel(channel_id)} 有效")
+                    else:
+                        self._logger.warning(f"跳过无效的源频道 {channel}: {reason}")
+                        result["failed"].append({
+                            "channel": channel,
+                            "reason": f"无效的频道: {reason}"
+                        })
+                except ChannelParseError as e:
+                    self._logger.error(f"解析源频道 {channel} 失败: {str(e)}")
+                    result["failed"].append({
+                        "channel": channel,
+                        "reason": f"解析频道失败: {str(e)}"
+                    })
+            
+            if not valid_source_channels:
+                self._logger.error("没有有效的源频道可供下载")
+                return {
+                    "success": False,
+                    "error": "没有有效的源频道可供下载",
+                    "detail": result
+                }
                 
             # 获取其他配置
             start_id = download_config.get("start_id", 0)
@@ -646,7 +707,7 @@ class Downloader(DownloaderInterface):
             pause_time = download_config.get("pause_time", 300)
             
             # 处理每个源频道
-            for source_channel in source_channels:
+            for source_channel in valid_source_channels:
                 channel_result = await self._download_from_channel(
                     source_channel, 
                     start_id, 
@@ -705,18 +766,20 @@ class Downloader(DownloaderInterface):
         }
         
         try:
-            # 解析频道标识符
-            chat = await self._client.get_chat(channel)
-            if not chat:
+            # 使用新的频道解析功能获取实际chat_id
+            chat_id = await get_actual_chat_id(channel)
+            if not chat_id:
                 self._logger.error(f"无法获取频道信息: {channel}")
                 result["failed"].append({
                     "channel": channel,
                     "reason": "无法获取频道信息" 
                 })
                 return result
-                
-            chat_id = chat.id
             
+            # 在日志中记录格式化的频道名称
+            formatted_channel = format_channel(chat_id)
+            self._logger.info(f"从频道 {formatted_channel} 下载消息，ID范围: {start_id}-{end_id}")
+                
             # 创建批次数据
             batch = {
                 "chat_id": chat_id,

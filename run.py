@@ -21,6 +21,10 @@ PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, PROJECT_ROOT)
 
 from tg_forwarder.core.application import Application
+from tg_forwarder.core.channel_factory import (
+    parse_channel, format_channel, is_channel_valid, can_forward_from, can_forward_to, filter_channels
+)
+from tg_forwarder.utils.exceptions import ChannelParseError
 
 
 def setup_argument_parser() -> argparse.ArgumentParser:
@@ -256,6 +260,86 @@ async def start_monitor(args: argparse.Namespace) -> None:
             print('    "duration": "2025-3-28-1"')
             print('  }')
             return
+        
+        # 验证频道对配置
+        channel_pairs = monitor_config.get("channel_pairs", {})
+        updated_channel_pairs = {}
+        
+        # 获取频道工具实例进行频道验证
+        channel_utils = app.get_channel_utils()
+        
+        print("正在验证频道配置...")
+        
+        # 验证源频道
+        source_channels = list(channel_pairs.keys())
+        filtered_source_channels = filter_channels(source_channels)
+        
+        if not filtered_source_channels:
+            print("错误: 所有源频道格式无效。请检查monitor.channel_pairs中的源频道配置。")
+            return
+            
+        valid_source_channels = []
+        for source in filtered_source_channels:
+            try:
+                # 验证频道有效性
+                channel_id, _ = parse_channel(source)
+                valid, reason = await is_channel_valid(source)
+                
+                if valid:
+                    # 检查转发权限
+                    can_forward, reason = await can_forward_from(source)
+                    if can_forward:
+                        valid_source_channels.append(source)
+                        print(f"源频道 {format_channel(channel_id)} 有效且允许转发")
+                    else:
+                        print(f"警告: 源频道 {format_channel(channel_id)} 不允许转发: {reason}")
+                else:
+                    print(f"警告: 无效的源频道 {source}: {reason}")
+            except ChannelParseError as e:
+                print(f"错误: 解析源频道 {source} 失败: {str(e)}")
+                
+        if not valid_source_channels:
+            print("错误: 没有有效的源频道可用于监听转发。请检查频道配置和权限。")
+            return
+        
+        # 验证每个源频道的目标频道
+        for source in valid_source_channels:
+            target_channels = channel_pairs.get(source, [])
+            if not target_channels:
+                print(f"警告: 源频道 {source} 没有配置目标频道，将被跳过")
+                continue
+                
+            filtered_target_channels = filter_channels(target_channels)
+            valid_target_channels = []
+            
+            for target in filtered_target_channels:
+                try:
+                    # 验证频道有效性
+                    channel_id, _ = parse_channel(target)
+                    valid, reason = await is_channel_valid(target)
+                    
+                    if valid:
+                        # 检查转发权限
+                        can_forward, reason = await can_forward_to(target)
+                        if can_forward:
+                            valid_target_channels.append(target)
+                            print(f"目标频道 {format_channel(channel_id)} 有效且可接收转发")
+                        else:
+                            print(f"警告: 无法转发到目标频道 {format_channel(channel_id)}: {reason}")
+                    else:
+                        print(f"警告: 无效的目标频道 {target}: {reason}")
+                except ChannelParseError as e:
+                    print(f"错误: 解析目标频道 {target} 失败: {str(e)}")
+                    
+            if valid_target_channels:
+                updated_channel_pairs[source] = valid_target_channels
+                
+        if not updated_channel_pairs:
+            print("错误: 没有有效的频道对可用于监听转发。请检查频道配置和权限。")
+            return
+            
+        # 更新配置
+        monitor_config["channel_pairs"] = updated_channel_pairs
             
         # 解析持续时间
         duration = monitor_config.get("duration", "2025-12-31-23")
@@ -268,7 +352,7 @@ async def start_monitor(args: argparse.Namespace) -> None:
                 end_time = datetime(year, month, day, hour)
                 
                 print(f"开始监听源频道的消息...")
-                print(f"频道配对: {len(monitor_config.get('channel_pairs', {}))}对")
+                print(f"频道配对: {len(updated_channel_pairs)}对")
                 print(f"监听截止时间: {end_time.strftime('%Y-%m-%d %H:%M:%S')}")
                 
                 # 开始监听

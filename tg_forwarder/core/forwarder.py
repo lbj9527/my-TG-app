@@ -15,6 +15,10 @@ from tg_forwarder.interfaces.uploader_interface import UploaderInterface
 from tg_forwarder.interfaces.status_tracker_interface import StatusTrackerInterface
 from tg_forwarder.interfaces.logger_interface import LoggerInterface
 from tg_forwarder.interfaces.config_interface import ConfigInterface
+from tg_forwarder.core.channel_factory import (
+    parse_channel, format_channel, is_channel_valid, can_forward_from, can_forward_to
+)
+from tg_forwarder.utils.exceptions import ChannelParseError
 
 
 class Forwarder(ForwarderInterface):
@@ -885,19 +889,82 @@ class Forwarder(ForwarderInterface):
             # 对于目标频道，使用第一个源频道的目标频道作为默认值
             default_targets = channel_pairs.get(source_channels[0], []) if source_channels else []
             target_channels = []
+            
+            # 验证源频道
+            valid_source_channels = []
+            for source in source_channels:
+                try:
+                    # 使用新的频道解析功能解析频道标识符
+                    channel_id, _ = parse_channel(source)
+                    valid, reason = await is_channel_valid(source)
+                    
+                    if valid:
+                        # 检查转发权限
+                        can_forward, reason = await can_forward_from(source)
+                        if can_forward:
+                            valid_source_channels.append(source)
+                            self._logger.info(f"源频道 {format_channel(channel_id)} 有效且允许转发")
+                        else:
+                            self._logger.warning(f"源频道 {format_channel(channel_id)} 不允许转发: {reason}")
+                    else:
+                        self._logger.warning(f"无效的源频道 {source}: {reason}")
+                except ChannelParseError as e:
+                    self._logger.error(f"解析源频道 {source} 失败: {str(e)}")
+            
+            if not valid_source_channels:
+                return {"success": False, "error": "没有有效的源频道可用于转发"}
+            
+            # 验证目标频道
+            valid_target_channels = []
             for targets in channel_pairs.values():
-                target_channels.extend(targets)
-            target_channels = list(set(target_channels))  # 去重
+                for target in targets:
+                    try:
+                        # 使用新的频道解析功能解析频道标识符
+                        channel_id, _ = parse_channel(target)
+                        valid, reason = await is_channel_valid(target)
+                        
+                        if valid:
+                            # 检查转发权限
+                            can_forward, reason = await can_forward_to(target)
+                            if can_forward:
+                                if target not in valid_target_channels:
+                                    valid_target_channels.append(target)
+                                    self._logger.info(f"目标频道 {format_channel(channel_id)} 有效且可接收转发")
+                            else:
+                                self._logger.warning(f"无法转发到目标频道 {format_channel(channel_id)}: {reason}")
+                        else:
+                            self._logger.warning(f"无效的目标频道 {target}: {reason}")
+                    except ChannelParseError as e:
+                        self._logger.error(f"解析目标频道 {target} 失败: {str(e)}")
+            
+            if not valid_target_channels:
+                return {"success": False, "error": "没有有效的目标频道可接收转发"}
+            
+            # 更新配置中的频道信息
+            updated_channel_pairs = {}
+            for source in valid_source_channels:
+                valid_targets = []
+                for target in channel_pairs.get(source, []):
+                    if target in valid_target_channels:
+                        valid_targets.append(target)
+                if valid_targets:
+                    updated_channel_pairs[source] = valid_targets
+            
+            if not updated_channel_pairs:
+                return {"success": False, "error": "没有有效的源频道到目标频道的映射"}
+            
+            forward_config["channel_pairs"] = updated_channel_pairs
+            target_channels = valid_target_channels
             
             # 提取其他参数
             caption_template = forward_config.get("caption_template", "{original_caption}")
             remove_captions = forward_config.get("remove_captions", False)
             download_media = forward_config.get("download_media", True)
             
-            self._logger.info(f"启动转发服务，监控源频道: {source_channels}")
+            self._logger.info(f"启动转发服务，监控源频道: {valid_source_channels}")
             
             # 保存转发配置
-            self._source_channels = source_channels
+            self._source_channels = valid_source_channels
             self._target_channels = target_channels
             self._forward_config = forward_config
             
@@ -914,7 +981,7 @@ class Forwarder(ForwarderInterface):
             return {
                 "success": True, 
                 "task_id": id(self._forward_task),
-                "source_channels": source_channels,
+                "source_channels": valid_source_channels,
                 "target_channels": target_channels,
                 "config": self._forward_config
             }

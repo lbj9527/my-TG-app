@@ -4,7 +4,7 @@
 """
 
 from abc import ABC, abstractmethod
-from typing import Dict, Any, List, Union, Optional, Tuple
+from typing import Dict, Any, List, Union, Optional, Tuple, Callable
 from datetime import datetime
 
 from tg_forwarder.interfaces.client_interface import TelegramClientInterface
@@ -13,7 +13,6 @@ from tg_forwarder.interfaces.uploader_interface import UploaderInterface
 from tg_forwarder.interfaces.forwarder_interface import ForwarderInterface
 from tg_forwarder.interfaces.config_interface import ConfigInterface
 from tg_forwarder.interfaces.status_tracker_interface import StatusTrackerInterface
-from tg_forwarder.interfaces.storage_interface import StorageInterface
 from tg_forwarder.interfaces.logger_interface import LoggerInterface
 from tg_forwarder.interfaces.json_storage_interface import JsonStorageInterface
 from tg_forwarder.interfaces.history_tracker_interface import HistoryTrackerInterface
@@ -97,18 +96,6 @@ class ApplicationInterface(ABC):
         
         Returns:
             StatusTrackerInterface: 状态跟踪器接口实例
-        """
-        pass
-    
-    @abstractmethod
-    def get_storage(self) -> StorageInterface:
-        """
-        获取存储实例
-        
-        Returns:
-            StorageInterface: 存储接口实例
-            
-        @deprecated: 此方法将在未来版本中被移除。请使用get_json_storage和get_history_tracker替代。
         """
         pass
     

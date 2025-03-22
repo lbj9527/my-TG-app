@@ -4,13 +4,16 @@
 """
 
 import uuid
+import json
+import os
+import time
 from typing import Dict, Any, List, Union, Optional
 from datetime import datetime, timedelta
 import threading
 
 from tg_forwarder.interfaces.status_tracker_interface import StatusTrackerInterface
-from tg_forwarder.interfaces.storage_interface import StorageInterface
 from tg_forwarder.interfaces.logger_interface import LoggerInterface
+from tg_forwarder.interfaces.json_storage_interface import JsonStorageInterface
 
 
 class StatusTracker(StatusTrackerInterface):
@@ -19,15 +22,15 @@ class StatusTracker(StatusTrackerInterface):
     负责跟踪和管理消息转发状态
     """
     
-    def __init__(self, storage: StorageInterface, logger: LoggerInterface):
+    def __init__(self, json_storage: JsonStorageInterface, logger: LoggerInterface):
         """
         初始化状态追踪器
         
         Args:
-            storage: 存储接口实例
+            json_storage: JSON存储接口实例
             logger: 日志接口实例
         """
-        self._storage = storage
+        self._json_storage = json_storage
         self._logger = logger.get_logger("StatusTracker")
         self._collection_name = "forwarding_tasks"
         self._initialized = False
@@ -35,6 +38,24 @@ class StatusTracker(StatusTrackerInterface):
         self._last_updated = {}
         self._cache_ttl = 300  # 默认缓存有效期为5分钟
         self._lock = threading.RLock()
+        
+        # 全局状态字典
+        self._status_dict = {
+            "initialized": False,
+            "active_tasks": {},
+            "task_history": {},
+            "current_operations": {},
+            "last_updated": datetime.now().isoformat()
+        }
+        
+        # 状态文件路径
+        self._status_file = "status/status.json"
+        
+        # 锁对象
+        self._locks = {}
+        
+        # 缓存对象
+        self._cache = {}
     
     async def initialize(self) -> bool:
         """
@@ -44,13 +65,9 @@ class StatusTracker(StatusTrackerInterface):
             bool: 初始化是否成功
         """
         try:
-            # 确保数据库已初始化
-            if not self._storage._initialized:
-                self._logger.error("存储系统未初始化")
-                return False
-            
-            # 确保索引存在
-            await self._ensure_indexes()
+            # 在JSON文件系统中，不需要检查特定的初始化状态
+            # 确保状态文件目录存在
+            os.makedirs(os.path.dirname(self._status_file), exist_ok=True)
             
             self._initialized = True
             self._logger.info("状态追踪器初始化完成")
@@ -59,19 +76,6 @@ class StatusTracker(StatusTrackerInterface):
             self._logger.error(f"初始化状态追踪器失败: {str(e)}", exc_info=True)
             self._initialized = False
             return False
-    
-    async def _ensure_indexes(self):
-        """确保必要的索引存在"""
-        # 为转发任务创建索引
-        await self._storage.ensure_index(self._collection_name, ["source_chat_id", "message_id"], unique=True)
-        await self._storage.ensure_index(self._collection_name, ["status"])
-        await self._storage.ensure_index(self._collection_name, ["created_at"])
-        
-        # 为频道状态创建索引
-        await self._storage.ensure_index("channel_status", ["chat_id"], unique=True)
-        
-        # 为系统状态创建索引
-        await self._storage.ensure_index("system_status", ["component"], unique=True)
     
     def shutdown(self) -> None:
         """关闭状态追踪器，释放资源"""
@@ -120,7 +124,7 @@ class StatusTracker(StatusTrackerInterface):
             "upload_tasks": []
         }
         
-        if self._storage.store(self._collection_name, task_id, task_data):
+        if self._json_storage.store(self._collection_name, task_id, task_data):
             self._logger.info(f"开始下载消息: chat_id={chat_id}, message_id={message_id}, task_id={task_id}")
             return task_id
         else:
@@ -139,7 +143,7 @@ class StatusTracker(StatusTrackerInterface):
             self._logger.error("状态追踪器未初始化")
             return
         
-        task = self._storage.retrieve(self._collection_name, task_id)
+        task = self._json_storage.retrieve(self._collection_name, task_id)
         if not task:
             self._logger.error(f"找不到任务: {task_id}")
             return
@@ -149,7 +153,7 @@ class StatusTracker(StatusTrackerInterface):
         task["download_completed_at"] = datetime.now().isoformat()
         task["file_path"] = file_path
         
-        if self._storage.update(self._collection_name, task_id, task):
+        if self._json_storage.update(self._collection_name, task_id, task):
             self._logger.info(f"下载完成: task_id={task_id}, file_path={file_path}")
         else:
             self._logger.error(f"记录下载完成失败: task_id={task_id}")
@@ -166,7 +170,7 @@ class StatusTracker(StatusTrackerInterface):
             self._logger.error("状态追踪器未初始化")
             return
         
-        task = self._storage.retrieve(self._collection_name, task_id)
+        task = self._json_storage.retrieve(self._collection_name, task_id)
         if not task:
             self._logger.error(f"找不到任务: {task_id}")
             return
@@ -175,7 +179,7 @@ class StatusTracker(StatusTrackerInterface):
         task["updated_at"] = datetime.now().isoformat()
         task["download_error"] = error
         
-        if self._storage.update(self._collection_name, task_id, task):
+        if self._json_storage.update(self._collection_name, task_id, task):
             self._logger.warning(f"下载失败: task_id={task_id}, error={error}")
         else:
             self._logger.error(f"记录下载失败状态失败: task_id={task_id}")
@@ -192,7 +196,7 @@ class StatusTracker(StatusTrackerInterface):
             self._logger.error("状态追踪器未初始化")
             return
         
-        task = self._storage.retrieve(self._collection_name, task_id)
+        task = self._json_storage.retrieve(self._collection_name, task_id)
         if not task:
             self._logger.error(f"找不到任务: {task_id}")
             return
@@ -224,7 +228,7 @@ class StatusTracker(StatusTrackerInterface):
         task["status"] = "uploading"
         task["updated_at"] = datetime.now().isoformat()
         
-        if self._storage.update(self._collection_name, task_id, task):
+        if self._json_storage.update(self._collection_name, task_id, task):
             self._logger.info(f"开始上传: task_id={task_id}, target_chat_id={target_chat_id}")
         else:
             self._logger.error(f"记录上传开始失败: task_id={task_id}, target_chat_id={target_chat_id}")
@@ -243,7 +247,7 @@ class StatusTracker(StatusTrackerInterface):
             self._logger.error("状态追踪器未初始化")
             return
         
-        task = self._storage.retrieve(self._collection_name, task_id)
+        task = self._json_storage.retrieve(self._collection_name, task_id)
         if not task:
             self._logger.error(f"找不到任务: {task_id}")
             return
@@ -269,7 +273,7 @@ class StatusTracker(StatusTrackerInterface):
         
         task["updated_at"] = datetime.now().isoformat()
         
-        if self._storage.update(self._collection_name, task_id, task):
+        if self._json_storage.update(self._collection_name, task_id, task):
             self._logger.info(f"上传完成: task_id={task_id}, target_chat_id={target_chat_id}, target_message_id={target_message_id}")
         else:
             self._logger.error(f"记录上传完成失败: task_id={task_id}, target_chat_id={target_chat_id}")
@@ -288,7 +292,7 @@ class StatusTracker(StatusTrackerInterface):
             self._logger.error("状态追踪器未初始化")
             return
         
-        task = self._storage.retrieve(self._collection_name, task_id)
+        task = self._json_storage.retrieve(self._collection_name, task_id)
         if not task:
             self._logger.error(f"找不到任务: {task_id}")
             return
@@ -318,7 +322,7 @@ class StatusTracker(StatusTrackerInterface):
         
         task["updated_at"] = datetime.now().isoformat()
         
-        if self._storage.update(self._collection_name, task_id, task):
+        if self._json_storage.update(self._collection_name, task_id, task):
             self._logger.warning(f"上传失败: task_id={task_id}, target_chat_id={target_chat_id}, error={error}")
         else:
             self._logger.error(f"记录上传失败状态失败: task_id={task_id}, target_chat_id={target_chat_id}")
@@ -337,7 +341,7 @@ class StatusTracker(StatusTrackerInterface):
             self._logger.error("状态追踪器未初始化")
             return {}
         
-        task = self._storage.retrieve(self._collection_name, task_id)
+        task = self._json_storage.retrieve(self._collection_name, task_id)
         if not task:
             self._logger.warning(f"找不到任务: {task_id}")
             return {}
@@ -360,7 +364,7 @@ class StatusTracker(StatusTrackerInterface):
         result = []
         
         for status in pending_statuses:
-            tasks = self._storage.query(
+            tasks = self._json_storage.query(
                 self._collection_name,
                 {"status": status},
                 sort_by="created_at"
@@ -395,7 +399,7 @@ class StatusTracker(StatusTrackerInterface):
         end_str = end_date.isoformat()
         
         # 获取所有时间范围内的任务
-        tasks = self._storage.query(
+        tasks = self._json_storage.query(
             self._collection_name,
             {},
             sort_by="created_at"

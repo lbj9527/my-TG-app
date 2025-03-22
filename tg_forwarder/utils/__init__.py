@@ -4,7 +4,8 @@
 
 from tg_forwarder.logModule.logger import setup_logger, get_logger
 from tg_forwarder.utils.error_handler import ErrorHandler
-from tg_forwarder.utils.channel_parser import ChannelParser, ChannelParseError
+from tg_forwarder.utils.exceptions import ChannelParseError
+from tg_forwarder.utils.channel_parser import ChannelParser
 from tg_forwarder.utils.channel_utils import (
     ChannelUtils, 
     get_channel_utils, 

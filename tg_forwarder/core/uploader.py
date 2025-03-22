@@ -6,9 +6,12 @@
 import os
 import time
 import asyncio
+import logging
 import shutil
 from typing import Dict, Any, List, Union, Optional, Tuple
 from datetime import datetime, timedelta
+import hashlib
+import json
 
 from pyrogram.types import Message
 from pyrogram.errors import FloodWait, MessageIdInvalid, MessageNotModified
@@ -17,8 +20,13 @@ from tg_forwarder.interfaces.uploader_interface import UploaderInterface
 from tg_forwarder.interfaces.client_interface import TelegramClientInterface
 from tg_forwarder.interfaces.config_interface import ConfigInterface
 from tg_forwarder.interfaces.logger_interface import LoggerInterface
-from tg_forwarder.interfaces.storage_interface import StorageInterface
 from tg_forwarder.interfaces.status_tracker_interface import StatusTrackerInterface
+from tg_forwarder.interfaces.json_storage_interface import JsonStorageInterface
+from tg_forwarder.interfaces.history_tracker_interface import HistoryTrackerInterface
+from tg_forwarder.core.channel_factory import (
+    parse_channel, format_channel, is_channel_valid, can_forward_to, get_actual_chat_id, filter_channels
+)
+from tg_forwarder.utils.exceptions import ChannelParseError
 
 
 class Uploader(UploaderInterface):
@@ -28,8 +36,8 @@ class Uploader(UploaderInterface):
     """
     
     def __init__(self, client: TelegramClientInterface, config: ConfigInterface, 
-                 logger: LoggerInterface, storage: StorageInterface,
-                 status_tracker: StatusTrackerInterface):
+                 logger: LoggerInterface, json_storage: JsonStorageInterface,
+                 status_tracker: StatusTrackerInterface, history_tracker: HistoryTrackerInterface):
         """
         初始化上传器
         
@@ -37,14 +45,16 @@ class Uploader(UploaderInterface):
             client: Telegram客户端接口实例
             config: 配置接口实例
             logger: 日志接口实例
-            storage: 存储接口实例
+            json_storage: JSON存储接口实例
             status_tracker: 状态追踪器接口实例
+            history_tracker: 历史记录跟踪器接口实例
         """
         self._client = client
         self._config = config
         self._logger = logger.get_logger("Uploader")
-        self._storage = storage
+        self._json_storage = json_storage
         self._status_tracker = status_tracker
+        self._history_tracker = history_tracker
         
         self._initialized = False
         self._upload_semaphore = None  # 上传信号量，用于限制并发上传数
@@ -53,6 +63,17 @@ class Uploader(UploaderInterface):
         # 上传状态追踪
         self._upload_status = {}  # task_id -> status
         self._media_groups = {}  # group_id -> [task_ids]
+        
+        # 上传配置
+        self._upload_path = "uploads"
+        self._verify_before_upload = True
+        
+        # 当前上传任务状态
+        self._is_uploading = False
+        self._current_tasks = {}
+        self._upload_queue = asyncio.Queue()
+        self._active_uploads = 0
+        self._max_concurrent_uploads = 2
         
     async def initialize(self) -> bool:
         """
@@ -658,7 +679,7 @@ class Uploader(UploaderInterface):
                 record["group_id"] = group_id
             
             key = f"upload:{original_chat_id}:{original_message_id}"
-            self._storage.store_data("uploads", key, record)
+            self._json_storage.store_data("uploads", key, record)
             
         except Exception as e:
             self._logger.error(f"保存上传记录失败: {str(e)}", exc_info=True)
@@ -694,7 +715,7 @@ class Uploader(UploaderInterface):
                 record["original_chat_id"] = str(original_chat_id)
             
             key = f"forward:{source_chat_id}:{source_message_id}:{target_chat_id}"
-            self._storage.store_data("forwards", key, record)
+            self._json_storage.store_data("forwards", key, record)
             
         except Exception as e:
             self._logger.error(f"保存转发记录失败: {str(e)}", exc_info=True)
@@ -714,12 +735,12 @@ class Uploader(UploaderInterface):
             cutoff_str = cutoff_date.isoformat()
             
             # 查询旧记录
-            old_uploads = self._storage.query_data(
+            old_uploads = self._json_storage.query_data(
                 "uploads", 
                 {"value.uploaded_at": {"$lt": cutoff_str}}
             )
             
-            old_forwards = self._storage.query_data(
+            old_forwards = self._json_storage.query_data(
                 "forwards", 
                 {"value.forwarded_at": {"$lt": cutoff_str}}
             )
@@ -729,13 +750,13 @@ class Uploader(UploaderInterface):
             for record in old_uploads:
                 key = record.get("key")
                 if key:
-                    self._storage.delete_data("uploads", key)
+                    self._json_storage.delete_data("uploads", key)
                     deleted_count += 1
             
             for record in old_forwards:
                 key = record.get("key")
                 if key:
-                    self._storage.delete_data("forwards", key)
+                    self._json_storage.delete_data("forwards", key)
                     deleted_count += 1
             
             self._logger.info(f"已清理 {deleted_count} 条旧记录")
@@ -833,6 +854,49 @@ class Uploader(UploaderInterface):
                     "error": "上传配置中没有指定目标频道",
                     "detail": upload_config
                 }
+            
+            # 使用新的频道解析功能过滤并验证目标频道
+            filtered_channels = filter_channels(target_channels)
+            valid_target_channels = []
+            
+            for channel in filtered_channels:
+                try:
+                    # 验证频道有效性和转发权限
+                    channel_id, _ = parse_channel(channel)
+                    valid, reason = await is_channel_valid(channel)
+                    
+                    if valid:
+                        # 检查是否可以转发到该频道
+                        can_forward, reason = await can_forward_to(channel)
+                        if can_forward:
+                            valid_target_channels.append(channel)
+                            self._logger.info(f"目标频道 {format_channel(channel_id)} 有效且可接收上传")
+                        else:
+                            self._logger.warning(f"跳过无法上传的目标频道 {channel}: {reason}")
+                            result["failed"].append({
+                                "channel": channel,
+                                "reason": f"无法上传到该频道: {reason}"
+                            })
+                    else:
+                        self._logger.warning(f"跳过无效的目标频道 {channel}: {reason}")
+                        result["failed"].append({
+                            "channel": channel,
+                            "reason": f"无效的频道: {reason}"
+                        })
+                except ChannelParseError as e:
+                    self._logger.error(f"解析目标频道 {channel} 失败: {str(e)}")
+                    result["failed"].append({
+                        "channel": channel,
+                        "reason": f"解析频道失败: {str(e)}"
+                    })
+            
+            if not valid_target_channels:
+                self._logger.error("没有有效的目标频道可供上传")
+                return {
+                    "success": False,
+                    "error": "没有有效的目标频道可供上传",
+                    "detail": result
+                }
                 
             # 获取其他配置
             upload_directory = upload_config.get("directory", "uploads")
@@ -875,18 +939,20 @@ class Uploader(UploaderInterface):
                         })
             
             # 处理每个目标频道
-            for target_channel in target_channels:
-                # 解析频道标识符
-                chat = await self._client.get_chat(target_channel)
-                if not chat:
+            for target_channel in valid_target_channels:
+                # 使用新的频道解析功能获取实际chat_id
+                chat_id = await get_actual_chat_id(target_channel)
+                if not chat_id:
                     self._logger.error(f"无法获取频道信息: {target_channel}")
                     result["failed"].append({
                         "channel": target_channel,
                         "reason": "无法获取频道信息" 
                     })
                     continue
-                    
-                chat_id = chat.id
+                
+                # 在日志中记录格式化的频道名称
+                formatted_channel = format_channel(chat_id)
+                self._logger.info(f"开始上传文件到频道 {formatted_channel}")
                 
                 # 处理每个媒体组
                 for group in media_groups:
@@ -1007,5 +1073,5 @@ class Uploader(UploaderInterface):
             bool: 是否已上传
         """
         key = f"uploaded:{chat_id}:{os.path.basename(file_path)}"
-        data = self._storage.retrieve("uploads", key)
+        data = self._json_storage.retrieve("uploads", key)
         return data is not None 
