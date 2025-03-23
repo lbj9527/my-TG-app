@@ -6,7 +6,7 @@
 在理解用户需求、编写代码和解决问题时，你应始终遵循以下原则：
 
 ## 项目初始化
-- 当用户提出任何需求时，请先浏览项目根目录下的README.md文件、program-doc.md文件和所有代码文档，理解项目目标、架构、计划和实现方式。
+- 当用户提出任何需求时，请先浏览项目根目录下的README.md文件文件和所有代码文档，理解项目目标、架构、计划和实现方式。
 - 如果还没有README文件，创建一个，这个文件将作为项目功能的说明书和预项目内容的规划。
 - 在README.md中清晰描述每次程序改动的内容，以及函数的用途、使用方法、参数说明和返回值说明，确保用户可以轻松理解和使用这些功能。
 - 每次修改完代码后，请更新README.md文件，包括修改的代码功能、参数说明和返回值说明，并遵循语义化版本规范(SemVer)：格式为X.Y.Z，其中X为主版本号(不兼容的API修改)，Y为次版本号(向后兼容的功能性新增)，Z为修订号(向后兼容的问题修正)。
@@ -18,59 +18,65 @@
 
 ## 开发要求
 ### 代码结构
-- tg_app/: 应用根包
+- my-TG-app/: 应用根包
   - __init__.py: 包初始化文件
-  - client.py: Telegram客户端实现，管理API连接
-  - config.py: 配置管理和验证
-  - manager.py: 应用主控制器，协调各功能模块
-  - forward/: 消息转发模块
-    - __init__.py: 模块初始化
-    - forwarder.py: 消息转发器实现
-    - status_tracker.py: 转发状态跟踪
-  - downloader/: 媒体下载模块
-    - __init__.py: 模块初始化
-    - message_fetcher.py: 消息获取功能
-    - media_downloader.py: 媒体文件下载功能
-  - uploader/: 媒体上传模块
-    - __init__.py: 模块初始化
-    - message_assembler.py: 消息重组功能
-    - media_uploader.py: 媒体上传功能
+  - main.py: 应用入口程序
+  - core/: 核心框架
+    - __init__.py: 包初始化文件
+    - application.py: 应用程序主类
+    - event_bus.py: 事件总线
+    - plugin_manager.py: 插件管理器
+    - context.py: 应用上下文
+    - config_manager.py: 配置管理
+  - plugins/: 插件模块
+    - __init__.py: 包初始化文件
+    - base.py: 插件基类
+    - client/: 客户端插件
+      - __init__.py
+      - client_plugin.py: Telegram客户端插件实现
+    - forward/: 转发插件
+      - __init__.py
+      - forward_plugin.py: 消息转发插件实现
+    - downloader/: 下载插件
+      - __init__.py
+      - download_plugin.py: 媒体下载插件实现
+    - uploader/: 上传插件
+      - __init__.py
+      - upload_plugin.py: 媒体上传插件实现
+    - utils/: 工具插件
+      - __init__.py
+      - channel_plugin.py: 频道工具插件实现
+  - events/: 事件定义
+    - __init__.py
+    - event_types.py: 事件类型常量
   - utils/: 工具类模块
-    - __init__.py: 模块初始化
-    - channel_utils.py: 频道操作工具
-    - channel_parser.py: 频道解析工具
+    - __init__.py
+    - logger.py: 日志配置和管理
     - common.py: 通用工具函数
   - task_queue/: 任务队列管理
-    - __init__.py: 模块初始化
+    - __init__.py
     - task_manager.py: 任务管理器
     - workers.py: 工作线程实现
-  - log/: 日志模块
-    - __init__.py: 模块初始化
-    - logger.py: 日志配置和管理
-  - interfaces/: 抽象接口定义
-    - __init__.py: 模块初始化
-    - client_interface.py: 客户端接口
-    - downloader_interface.py: 下载器接口
-    - uploader_interface.py: 上传器接口
-  - ui/: 用户界面模块
-    - __init__.py: 模块初始化
+  - ui/: 用户界面模块 (待实现)
+    - __init__.py
     - main_window.py: 主窗口实现
     - dialogs/: 对话框组件
     - widgets/: 自定义控件
     - views/: 视图实现
     - models/: UI数据模型
     - controllers/: 视图控制器
-    - resources/: UI资源文件
-    - styles/: 样式表和主题
-  - tests/: 测试代码
-    - __init__.py: 模块初始化
+  - tests/: 测试代码 (待实现)
+    - __init__.py
     - test_client.py: 客户端测试
     - test_forward.py: 转发功能测试
     - test_download.py: 下载功能测试
     - test_upload.py: 上传功能测试
-    - test_ui.py: UI测试
 - requirements.txt: Python依赖包
-- run.py: 应用启动脚本
+- config/: 配置文件目录
+  - default_config.ini: 默认配置文件
+- logs/: 日志文件目录
+- downloads/: 下载文件目录
+- sessions/: Telegram会话目录
 
 ### 编码规则
 - 使用 def 来定义函数。
@@ -97,6 +103,11 @@
 - **里氏替换原则 (LSP)**: 子类必须能够替换其父类而不影响程序正确性。确保继承关系合理，子类不应改变父类的行为契约。
 - **接口隔离原则 (ISP)**: 客户端不应被迫依赖于它们不使用的接口。创建特定的小接口而非一个大而全的接口。
 - **依赖倒置原则 (DIP)**: 高层模块不应依赖于低层模块，两者都应依赖于抽象。具体实现应依赖抽象接口，而非直接依赖其他具体实现。
+
+#### 事件驱动架构
+- **插件系统**: 所有功能通过插件方式组织，便于扩展和替换
+- **事件总线**: 组件间通过事件进行通信，而非直接依赖
+- **异步处理**: 使用asyncio进行异步操作，提高性能和响应性
 
 #### 异步编程模式
 - **事件驱动设计**: 使用事件和监听器模式解耦组件，提高系统响应性和可扩展性。
