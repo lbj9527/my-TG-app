@@ -6,6 +6,7 @@
 import os
 import json
 import configparser
+import copy
 from typing import Any, Dict, List, Optional, Union, TypeVar
 from pathlib import Path
 
@@ -25,50 +26,57 @@ class ConfigManager(ConfigInterface):
     负责加载、验证和管理应用程序配置
     """
     
-    def __init__(self, config_path: str = "config.ini"):
+    def __init__(self, config_path: str = "config.ini", verbose: bool = False):
         """
         初始化配置管理器
         
         Args:
             config_path: 配置文件路径，支持.ini和.json格式
+            verbose: 是否输出详细信息，默认为False
         """
         # 将相对路径转换为绝对路径
         if config_path and not os.path.isabs(config_path):
             config_path = os.path.abspath(config_path)
-            print(f"配置文件绝对路径: {config_path}")
+            if verbose:
+                print(f"配置文件绝对路径: {config_path}")
         
         self.config_path = config_path
         self.config = {}
         self.parser = configparser.ConfigParser()
         self._loaded = False
         
-        # 初始化时就尝试加载配置
-        self.load_config()
+        # 不再自动加载配置，让应用程序在需要时明确调用load_config()
     
-    def load_config(self) -> bool:
+    def load_config(self, verbose: bool = True) -> bool:
         """
         加载配置文件
         
+        Args:
+            verbose: 是否输出详细信息，默认为True
+            
         Returns:
             bool: 成功返回True，失败返回False
         """
-        print(f"正在加载配置文件: {self.config_path}")
+        if verbose:
+            print(f"正在加载配置文件: {self.config_path}")
         
         # 将相对路径转换为绝对路径以确保文件读取
         if not os.path.isabs(self.config_path):
             self.config_path = os.path.abspath(self.config_path)
-            print(f"配置文件绝对路径: {self.config_path}")
+            if verbose:
+                print(f"配置文件绝对路径: {self.config_path}")
         
         # 检查文件是否存在
         if not os.path.exists(self.config_path):
             print(f"配置文件不存在: {self.config_path}")
             return False
         
-        print(f"配置文件已找到")
+        if verbose:
+            print(f"配置文件已找到")
         
         # 根据文件扩展名选择加载方式
         if self.config_path.endswith('.json'):
-            load_success = self._load_json_config()
+            load_success = self._load_json_config(verbose)
             if not load_success:
                 print(f"加载JSON配置文件失败: {self.config_path}")
                 return False
@@ -82,7 +90,8 @@ class ConfigManager(ConfigInterface):
                     for key, value in self.parser.items(section):
                         self.config[section.lower()][key.lower()] = self._parse_ini_value(value)
                 self._loaded = True
-                print(f"配置加载成功: {self.config_path}")
+                if verbose:
+                    print(f"配置加载成功: {self.config_path}")
             except Exception as e:
                 print(f"加载INI配置文件失败: {e}")
                 return False
@@ -134,10 +143,12 @@ class ConfigManager(ConfigInterface):
             
         Returns:
             Any: 配置值或默认值
+            
+        Raises:
+            ConfigError: 如果配置项不存在且没有提供默认值
         """
         if not self._loaded:
-            print(f"配置未加载，获取 {key} 返回默认值")
-            return default
+            raise ConfigError(f"配置未加载，无法获取 {key}")
             
         try:
             # 处理嵌套键，如 'api.api_id'
@@ -148,18 +159,21 @@ class ConfigManager(ConfigInterface):
                     if isinstance(value, dict) and part in value:
                         value = value[part]
                     else:
-                        print(f"键 {key} 在配置中未找到，返回默认值")
-                        return default
+                        if default is not None:
+                            return default
+                        raise ConfigError(f"配置项 {key} 不存在")
                 return value
             else:
                 if key in self.config:
                     return self.config[key]
                 else:
-                    print(f"键 {key} 在配置中未找到，返回默认值")
-                    return default
+                    if default is not None:
+                        return default
+                    raise ConfigError(f"配置项 {key} 不存在")
         except Exception as e:
-            print(f"获取配置 {key} 时出错: {e}，返回默认值")
-            return default
+            if not isinstance(e, ConfigError) and default is not None:
+                return default
+            raise ConfigError(f"获取配置 {key} 失败: {str(e)}")
     
     def get_value(self, key: str, default: Optional[T] = None) -> T:
         """
@@ -183,7 +197,7 @@ class ConfigManager(ConfigInterface):
             value: 配置值
         """
         if not self._loaded:
-            self.load_config()
+            self.load_config(verbose=False)
         
         # 处理嵌套配置项
         if '.' in key:
@@ -230,102 +244,75 @@ class ConfigManager(ConfigInterface):
         """
         return self.get('download.directory', 'downloads')
     
-    def get_max_concurrent_uploads(self) -> int:
-        """
-        获取最大并发上传数量
-        
-        Returns:
-            int: 最大并发上传数量，默认为5
-        """
-        return int(self.get('upload.parallel_uploads', 5))
-    
     def get_temp_dir(self) -> str:
         """
         获取临时文件目录
         
         Returns:
-            str: 临时文件目录路径，默认为'temp'
+            str: 临时文件目录路径
+            
+        Raises:
+            ConfigError: 如果配置中没有指定临时目录
         """
-        return self.get('download.temp_directory', 'temp')
+        storage_config = self.get('storage')
+        if not storage_config:
+            raise ConfigError("配置中缺少存储配置")
+            
+        if 'tmp_path' not in storage_config:
+            raise ConfigError("存储配置中缺少tmp_path参数")
+            
+        return storage_config['tmp_path']
     
     def get_session_name(self) -> str:
         """
-        获取会话名称
+        获取Telegram会话文件名
         
         Returns:
-            str: 会话名称
+            str: 会话文件名
+            
+        Raises:
+            ConfigError: 如果配置中没有指定会话名称
         """
-        return self.get('telegram.session_name', 'tg_forwarder')
-    
-    def get_source_channels(self) -> List[Union[str, int]]:
-        """
-        获取源频道列表
-        
-        Returns:
-            List[Union[str, int]]: 源频道列表
-        """
-        source_channels = self.get('channels.source_channels', [])
-        if isinstance(source_channels, str):
-            # 处理逗号分隔的字符串
-            return [channel.strip() for channel in source_channels.split(',')]
-        return source_channels
-    
-    def get_target_channels(self) -> List[Union[str, int]]:
-        """
-        获取目标频道列表
-        
-        Returns:
-            List[Union[str, int]]: 目标频道列表
-        """
-        target_channels = self.get('channels.target_channels', [])
-        if isinstance(target_channels, str):
-            # 处理逗号分隔的字符串
-            return [channel.strip() for channel in target_channels.split(',')]
-        return target_channels
+        telegram_config = self.get('telegram')
+        if not telegram_config:
+            raise ConfigError("配置中缺少telegram配置")
+            
+        if 'session_name' not in telegram_config:
+            raise ConfigError("telegram配置中缺少session_name参数")
+            
+        return telegram_config['session_name']
     
     def get_forward_config(self) -> Dict[str, Any]:
         """
         获取转发配置
         
         Returns:
-            Dict[str, Any]: 转发配置字典，包含channel_pairs、start_id、end_id、limit、pause_time等参数
-        """
-        forward_config = self.get('forward', {})
-        
-        # 处理新字段 forward_channel_pairs，将数组结构转换为字典结构
-        channel_pairs = {}
-        forward_channel_pairs = forward_config.get('forward_channel_pairs', [])
-        for pair in forward_channel_pairs:
-            source = pair.get('source_channel')
-            targets = pair.get('target_channels', [])
-            if source and targets:
-                channel_pairs[source] = targets
-        
-        # 设置channel_pairs
-        forward_config['channel_pairs'] = channel_pairs
+            Dict[str, Any]: 转发配置字典
             
-        # 确保必要的参数存在，用默认值补全
-        defaults = {
-            'remove_captions': True,
-            'media_types': ['photo', 'video', 'document', 'audio', 'animation'],
-            'forward_delay': 2,
-            'timeout': 500,
-            'max_retries': 1,
-            'message_filter': '',
-            'add_watermark': False,
-            'watermark_text': '',
-            'forward_history': 'forward_history.json',
-            'start_id': 0,
-            'end_id': 2000,
-            'limit': 1000,
-            'pause_time': 300
-        }
-        
-        # 合并默认配置
-        for key, value in defaults.items():
-            if key not in forward_config:
-                forward_config[key] = value
+        Raises:
+            ConfigError: 如果配置中没有转发配置
+        """
+        forward_config = self.get('forward')
+        if not forward_config:
+            raise ConfigError("配置中缺少转发配置")
+            
+        # 处理channel_pairs，优先使用forward_channel_pairs
+        if 'forward_channel_pairs' in forward_config and forward_config['forward_channel_pairs']:
+            # 将forward_channel_pairs转换为channel_pairs格式
+            channel_pairs = {}
+            for pair in forward_config['forward_channel_pairs']:
+                source = pair.get('source_channel')
+                targets = pair.get('target_channels', [])
+                if source and targets:
+                    channel_pairs[source] = targets
+                    
+            if channel_pairs:
+                forward_config['channel_pairs'] = channel_pairs
                 
+        # 检查channel_pairs是否存在
+        if not forward_config.get('channel_pairs'):
+            raise ConfigError("转发配置中缺少有效的频道配对")
+            
         return forward_config
     
     def get_download_config(self) -> Dict[str, Any]:
@@ -334,25 +321,13 @@ class ConfigManager(ConfigInterface):
         
         Returns:
             Dict[str, Any]: 下载配置字典，包含source_channels、directory、timeout等参数
+            
+        Raises:
+            ConfigError: 如果配置中没有下载配置
         """
-        download_config = self.get('download', {})
+        download_config = self.get('download')
         if not download_config:
-            # 提供默认配置，与需求文档保持一致
-            return {
-                'source_channels': self.get_source_channels(),
-                'directory': 'downloads',
-                'organize_by_chat': True,
-                'timeout': 300,
-                'max_retries': 1,
-                'skip_existing': True,
-                'filename_pattern': '{chat_id}_{message_id}_{filename}',
-                'chunk_size': 1048576,
-                'download_history': 'download_history.json',
-                'start_id': 0,
-                'end_id': 1000,
-                'limit': 500,
-                'pause_time': 300
-            }
+            raise ConfigError("配置中缺少下载配置")
         return download_config
     
     def get_upload_config(self) -> Dict[str, Any]:
@@ -361,64 +336,50 @@ class ConfigManager(ConfigInterface):
         
         Returns:
             Dict[str, Any]: 上传配置字典，包含target_channels、directory、timeout等参数
+            
+        Raises:
+            ConfigError: 如果配置中没有上传配置
         """
-        upload_config = self.get('upload', {})
+        upload_config = self.get('upload')
         if not upload_config:
-            # 提供默认配置，与需求文档保持一致
-            return {
-                'target_channels': self.get_target_channels(),
-                'remove_captions': False,
-                'directory': 'uploads',
-                'verify_before_upload': True,
-                'timeout': 300,
-                'max_retries': 1,
-                'upload_history': 'upload_history.json',
-                'add_watermark': False,
-                'watermark_text': '',
-                'limit': 500,
-                'pause_time': 300
-            }
+            raise ConfigError("配置中缺少上传配置")
         return upload_config
     
     def get_monitor_config(self) -> Dict[str, Any]:
         """
-        获取监听配置
+        获取监控配置
         
         Returns:
-            Dict[str, Any]: 监听配置字典，包含channel_pairs、duration、forward_delay等参数
+            Dict[str, Any]: 监控配置字典
+            
+        Raises:
+            ConfigError: 如果配置中没有监控配置
         """
-        monitor_config = self.get('monitor', {})
-        
-        # 处理新字段 monitor_channel_pairs，将数组结构转换为字典结构
-        channel_pairs = {}
-        monitor_channel_pairs = monitor_config.get('monitor_channel_pairs', [])
-        for pair in monitor_channel_pairs:
-            source = pair.get('source_channel')
-            targets = pair.get('target_channels', [])
-            if source and targets:
-                channel_pairs[source] = targets
-        
-        # 设置channel_pairs
-        monitor_config['channel_pairs'] = channel_pairs
-        
-        # 确保必要的默认配置存在
-        if not monitor_config.get('duration'):
-            monitor_config['duration'] = '2025-3-28-1'  # 默认监听到2025年3月28日1点
-        if not monitor_config.get('remove_captions'):
-            monitor_config['remove_captions'] = True
-        if not monitor_config.get('media_types'):
-            monitor_config['media_types'] = ['photo', 'video', 'document', 'audio', 'animation']
-        if not monitor_config.get('forward_delay'):
-            monitor_config['forward_delay'] = 2
-        if not monitor_config.get('max_retries'):
-            monitor_config['max_retries'] = 3
-        if not monitor_config.get('message_filter'):
-            monitor_config['message_filter'] = ''
-        if not monitor_config.get('add_watermark'):
-            monitor_config['add_watermark'] = False
-        if not monitor_config.get('watermark_text'):
-            monitor_config['watermark_text'] = ''
+        monitor_config = self.get('monitor')
+        if not monitor_config:
+            raise ConfigError("配置中缺少监控配置")
+            
+        # 处理channel_pairs，优先使用monitor_channel_pairs
+        if 'monitor_channel_pairs' in monitor_config and monitor_config['monitor_channel_pairs']:
+            # 将monitor_channel_pairs转换为channel_pairs格式
+            channel_pairs = {}
+            for pair in monitor_config['monitor_channel_pairs']:
+                source = pair.get('source_channel')
+                targets = pair.get('target_channels', [])
+                if source and targets:
+                    channel_pairs[source] = targets
+                    
+            if channel_pairs:
+                monitor_config['channel_pairs'] = channel_pairs
                 
+        # 检查channel_pairs是否存在
+        if not monitor_config.get('channel_pairs'):
+            raise ConfigError("监控配置中缺少有效的频道配对")
+            
+        # 检查监控时长配置
+        if 'duration' not in monitor_config:
+            raise ConfigError("监控配置中缺少监控时长(duration)参数")
+            
         return monitor_config
     
     def get_storage_config(self) -> Dict[str, Any]:
@@ -426,14 +387,19 @@ class ConfigManager(ConfigInterface):
         获取存储配置
         
         Returns:
-            Dict[str, Any]: 存储配置字典，包含tmp_path等参数
+            Dict[str, Any]: 存储配置字典
+            
+        Raises:
+            ConfigError: 如果配置中没有存储配置或缺少必要参数
         """
-        storage_config = self.get('storage', {})
+        storage_config = self.get('storage')
         if not storage_config:
-            # 提供默认配置，与需求文档保持一致
-            return {
-                'tmp_path': 'temp'
-            }
+            raise ConfigError("配置中缺少存储配置")
+        
+        # 检查必要的tmp_path参数
+        if 'tmp_path' not in storage_config:
+            raise ConfigError("存储配置中缺少临时路径(tmp_path)参数")
+            
         return storage_config
     
     def get_channel_pairs(self) -> Dict[str, List[Union[str, int]]]:
@@ -442,60 +408,62 @@ class ConfigManager(ConfigInterface):
         
         Returns:
             Dict[str, List[Union[str, int]]]: 源频道到目标频道的映射字典
+            
+        Raises:
+            ConfigError: 如果找不到有效的频道配对
         """
-        result = {}
-        
-        # 从forward部分读取新的forward_channel_pairs
-        forward_channel_pairs = self.get('forward.forward_channel_pairs', [])
-        for pair in forward_channel_pairs:
-            source = pair.get('source_channel')
-            targets = pair.get('target_channels', [])
-            if source and targets:
-                result[source] = targets
+        # 1. 首先尝试从forward.channel_pairs获取
+        forward_config = self.get('forward', None)
+        if forward_config and 'channel_pairs' in forward_config:
+            return forward_config['channel_pairs']
+            
+        # 2. 尝试从forward.forward_channel_pairs获取并转换
+        if forward_config and 'forward_channel_pairs' in forward_config:
+            channel_pairs = {}
+            for pair in forward_config['forward_channel_pairs']:
+                source = pair.get('source_channel')
+                targets = pair.get('target_channels', [])
+                if source and targets:
+                    channel_pairs[source] = targets
+                    
+            if channel_pairs:
+                return channel_pairs
                 
-        return result
+        raise ConfigError("无法找到有效的频道配对配置")
     
-    def get_source_channel_config(self, channel_id: str) -> Dict[str, Any]:
+    def get_source_channel_config(self, channel_id: Optional[Union[int, str]] = None) -> Dict[str, Any]:
         """
-        获取特定源频道的配置
+        获取源频道配置
         
         Args:
-            channel_id: 源频道ID或URL
+            channel_id: 频道ID，可选
             
         Returns:
-            Dict[str, Any]: 源频道配置字典
-        """
-        # 标准化频道ID（移除前缀，如https://t.me/）
-        normalized_id = channel_id
-        if isinstance(channel_id, str):
-            if 't.me/' in channel_id.lower():
-                parts = channel_id.split('t.me/')
-                if len(parts) > 1:
-                    normalized_id = parts[1].split('/')[0]
-        
-        # 尝试获取特定频道的配置
-        source_configs = self.get('source_channel_config', {})
-        
-        # 直接尝试获取精确匹配的配置
-        exact_config = source_configs.get(normalized_id, None)
-        if exact_config:
-            return exact_config
+            Dict[str, Any]: 源频道配置
             
-        # 尝试查找匹配的域名/用户名部分
-        if isinstance(normalized_id, str):
-            for config_id, config in source_configs.items():
-                if isinstance(config_id, str) and normalized_id in config_id:
-                    return config
+        Raises:
+            ConfigError: 如果配置中缺少源频道配置
+        """
+        forward_config = self.get('forward')
+        if not forward_config:
+            raise ConfigError("配置中缺少转发配置")
         
-        # 返回默认配置，与需求文档保持一致
+        # 检查必要的参数是否存在
+        if 'remove_captions' not in forward_config:
+            raise ConfigError("转发配置中缺少remove_captions参数")
+        
+        if 'media_types' not in forward_config:
+            raise ConfigError("转发配置中缺少media_types参数")
+        
+        # 返回全局配置
         return {
-            'remove_captions': self.get('forward.remove_captions', True),
-            'media_types': self.get('forward.media_types', ['photo', 'video', 'document', 'audio', 'animation']),
-            'start_id': self.get('forward.start_id', 0),
-            'end_id': self.get('forward.end_id', 2000),
-            'message_filter': self.get('forward.message_filter', ''),
-            'add_watermark': self.get('forward.add_watermark', False),
-            'watermark_text': self.get('forward.watermark_text', '')
+            'remove_captions': forward_config.get('remove_captions', False),
+            'media_types': forward_config.get('media_types', []),
+            'start_id': forward_config.get('start_message_id'),
+            'end_id': forward_config.get('end_message_id'),
+            'message_filter': forward_config.get('message_filter'),
+            'add_watermark': forward_config.get('add_watermark', False),
+            'watermark_text': forward_config.get('watermark_text', '')
         }
     
     def validate(self) -> Dict[str, List[str]]:
@@ -576,10 +544,13 @@ class ConfigManager(ConfigInterface):
             for key, value in self.parser[section].items():
                 self.config[section.lower()][key.lower()] = self._parse_ini_value(value)
     
-    def _load_json_config(self) -> bool:
+    def _load_json_config(self, verbose: bool = True) -> bool:
         """
         从JSON文件加载配置
         
+        Args:
+            verbose: 是否输出详细信息，默认为True
+            
         Returns:
             bool: 加载成功返回True，否则返回False
         """
@@ -588,7 +559,8 @@ class ConfigManager(ConfigInterface):
                 self.config = json.load(f)
                 # 成功加载后设置_loaded为True
                 self._loaded = True
-                print(f"配置加载成功: {self.config_path}")
+                if verbose:
+                    print(f"配置加载成功: {self.config_path}")
                 return True
         except json.JSONDecodeError as e:
             print(f"配置文件JSON解析错误: {e}")
@@ -653,4 +625,26 @@ class ConfigManager(ConfigInterface):
                 pass
         
         # 默认作为字符串返回
-        return value 
+        return value
+    
+    def is_loaded(self) -> bool:
+        """
+        检查配置是否已经加载
+        
+        Returns:
+            bool: 配置是否已加载
+        """
+        return self._loaded
+    
+    def get_config_dict(self) -> Dict[str, Any]:
+        """
+        获取完整的配置字典
+        
+        Returns:
+            Dict[str, Any]: 包含所有配置项的字典
+        """
+        if not self.config or not self.is_loaded():
+            self.load_config()
+            
+        # 返回整个配置字典的深拷贝，避免外部修改影响原配置
+        return copy.deepcopy(self.config) 

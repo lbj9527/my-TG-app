@@ -1,5 +1,28 @@
 ## 版本历史
 
+### v0.3.8 (2024-09-01)
+
+#### 增强
+
+- **接口层完善**：
+  - 在 `ForwarderInterface` 接口中添加了 `forward_history_messages` 方法的定义，用于转发指定范围内的历史消息，解决了接口与实现不一致的问题
+  - 在 `ForwarderInterface` 接口中添加了 `schedule_forward` 方法的定义，用于计划在指定时间转发消息
+  - 在 `ForwarderInterface` 接口中添加了 `cancel_scheduled_forward` 方法的定义，用于取消计划转发任务
+  - 在 `ForwarderInterface` 接口中添加了 `get_forward_status` 方法的定义，用于获取转发任务状态
+
+#### 优化
+
+- **转发功能调整**：
+  - 修改了 `start_forwarding` 方法，使其在非监控模式下（`forward` 命令）只转发历史消息，完成后直接退出
+  - 移除了旧版的 `monitor_after_history` 参数，简化逻辑，避免在历史消息转发后继续监控
+  - 确保只有在监控模式下（`startmonitor` 命令）才会启动消息监控任务
+
+#### 文档
+
+- 更新了方法文档说明，明确 `forward_history_messages` 方法的参数和返回值
+- 更新了方法文档说明，明确 `schedule_forward`、`cancel_scheduled_forward` 和 `get_forward_status` 方法的参数和返回值
+- 改进了日志输出，使其更清晰地指示程序的运行状态
+
 ### v0.3.7 (2024-08-30)
 
 #### 重大变更
@@ -54,6 +77,7 @@
 #### 修复
 
 - **应用关闭流程修复**：
+
   - 修复了应用关闭时尝试在无法等待的对象上使用 `await` 关键字的错误
   - 正确实现了 `Application.shutdown()` 方法中对 `get_forwarding_status()` 的调用，使用同步方式检查服务状态
 
@@ -73,6 +97,7 @@
 #### 修复
 
 - **存储兼容性修复**：
+
   - 修复`StatusTracker`类初始化方法中对不存在的`_json_storage._initialized`属性的检查
   - 删除`StatusTracker`类中与旧存储系统相关的`_ensure_indexes`方法
   - 确保状态跟踪器可以正确使用新的`JsonStorage`存储系统
@@ -86,7 +111,7 @@
 
 - 提高应用程序的稳定性和健壮性
 - 确保存储相关组件的平滑迁移
-- 完成从旧存储系统到JSON存储的最终适配
+- 完成从旧存储系统到 JSON 存储的最终适配
 
 ### v0.3.3 (2024-08-20)
 
@@ -111,7 +136,7 @@
 #### 增强
 
 - **频道管理改进**：
-  - 支持多种频道标识符格式：ID、用户名、t.me链接
+  - 支持多种频道标识符格式：ID、用户名、t.me 链接
   - 智能频道验证系统，检查频道的有效性和权限
   - 频道信息缓存机制，提高频繁查询的性能
   - 用户友好的错误处理和消息格式化
@@ -121,7 +146,7 @@
 
 #### 重大变更
 
-- **完全移除storage相关代码**：
+- **完全移除 storage 相关代码**：
   - 删除旧的`StorageInterface`接口及其实现类`Storage`
   - 从`interfaces/__init__.py`中移除对`StorageInterface`的导入和导出
   - 更新`Application`类移除对`StorageInterface`的所有引用：
@@ -137,7 +162,7 @@
 - **完成存储层迁移**：完全完成从旧版`StorageInterface`到新版`JsonStorageInterface`和`HistoryTrackerInterface`的迁移
 - **代码简化**：移除不必要的功能，减少了代码复杂度
 - **接口一致性**：确保所有组件与接口层保持一致
-- **存储机制标准化**：统一使用JSON文件进行历史记录存储，符合需求文档要求
+- **存储机制标准化**：统一使用 JSON 文件进行历史记录存储，符合需求文档要求
 
 ### v0.3.1 (2024-08-10)
 

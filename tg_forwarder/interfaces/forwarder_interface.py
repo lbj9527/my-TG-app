@@ -1,228 +1,216 @@
 """
 转发器接口抽象
-定义了消息转发的必要方法
+定义了消息转发的必要方法，包括历史消息转发和实时监听转发
 """
 
 from abc import ABC, abstractmethod
-from typing import Dict, Any, List, Union, Optional, Tuple
-from datetime import datetime
+from typing import Dict, Any, List, Optional, Union, Set, Tuple
+from pyrogram.types import Message
 
 
 class ForwarderInterface(ABC):
     """
-    转发器接口，定义了消息转发的必要方法
+    转发器接口，定义了消息转发的必要方法     
     所有转发器实现都应该继承此接口
     """
-    
+
     @abstractmethod
     async def initialize(self) -> bool:
         """
-        初始化转发器
-        
+        初始化转发器（异步方法）
+
         Returns:
             bool: 初始化是否成功
         """
         pass
-    
+
     @abstractmethod
-    async def shutdown(self) -> None:
+    def close(self) -> None:
         """关闭转发器，释放资源"""
         pass
-    
+
     @abstractmethod
-    async def forward_message(self, source_channel: Union[str, int], 
-                            message_id: int,
-                            target_channels: List[Union[str, int]] = None) -> Dict[str, Any]:
+    async def start_forwarding(self, forward_config: Dict[str, Any]) -> Dict[str, Any]:
         """
-        转发单条消息
-        
+        开始历史消息转发流程
+
         Args:
-            source_channel: 源频道标识
+            forward_config: 转发配置，包含以下字段:
+                - forward_channel_pairs: 源频道与目标频道的映射关系
+                - remove_captions: 是否移除原始消息的标题
+                - media_types: 需转发的媒体类型列表
+                - forward_delay: 转发延迟（秒）
+                - timeout: 转发操作超时时间（秒）
+                - max_retries: 转发失败后的最大重试次数
+                - message_filter: 消息过滤器（预留接口）
+                - add_watermark: 是否添加水印（预留接口）
+                - watermark_text: 水印文本（预留接口）
+                - start_id: 起始消息ID
+                - end_id: 结束消息ID
+                - limit: 转发消息数量上限
+                - pause_time: A到达限制后的暂停时间（秒）
+
+        Returns:
+            Dict[str, Any]: 转发结果统计
+        """
+        pass
+
+    @abstractmethod
+    async def forward_messages(self, source_channel: Union[str, int], 
+                              target_channels: List[Union[str, int]],
+                              start_id: int = 0, 
+                              end_id: int = 0,
+                              limit: int = 100,
+                              media_types: List[str] = None,
+                              remove_captions: bool = False) -> Dict[str, Any]:
+        """
+        转发指定频道范围内的历史消息
+
+        Args:
+            source_channel: 源频道标识符
+            target_channels: 目标频道标识符列表
+            start_id: 起始消息ID，0表示从最新消息开始
+            end_id: 结束消息ID，0表示不设结束ID
+            limit: 转发消息数量上限
+            media_types: 需转发的媒体类型列表，None表示转发所有类型
+            remove_captions: 是否移除原始消息的标题
+
+        Returns:
+            Dict[str, Any]: 转发结果统计
+        """
+        pass
+
+    @abstractmethod
+    async def forward_history_messages(self, source_channel: Union[str, int], 
+                                      target_channels: List[Union[str, int]],
+                                      start_id: int = 0, 
+                                      end_id: int = 0,
+                                      limit: int = 100,
+                                      media_types: List[str] = None,
+                                      remove_captions: bool = False,
+                                      download_media: bool = False) -> Dict[str, Any]:
+        """
+        转发指定频道范围内的历史消息，处理媒体消息和普通消息
+
+        Args:
+            source_channel: 源频道标识符
+            target_channels: 目标频道标识符列表
+            start_id: 起始消息ID，0表示从最新消息开始
+            end_id: 结束消息ID，0表示不设结束ID
+            limit: 转发消息数量上限
+            media_types: 需转发的媒体类型列表，None表示转发所有类型
+            remove_captions: 是否移除原始消息的标题
+            download_media: 对于禁止转发的频道，是否下载媒体后重新上传
+
+        Returns:
+            Dict[str, Any]: 转发结果统计
+        """
+        pass
+
+    @abstractmethod
+    async def forward_single_message(self, message: Message, 
+                                    target_channels: List[Union[str, int]],
+                                    remove_captions: bool = False,
+                                    download_media: bool = False) -> Dict[str, Any]:
+        """
+        转发单条消息到指定目标频道
+
+        Args:
+            message: 要转发的消息
+            target_channels: 目标频道标识符列表
+            remove_captions: 是否移除原始消息的标题
+            download_media: 对于禁止转发的频道，是否下载媒体后重新上传
+
+        Returns:
+            Dict[str, Any]: 转发结果
+        """
+        pass
+
+    @abstractmethod
+    async def check_message_forwarded(self, source_channel: Union[str, int], 
+                                     message_id: int, 
+                                     target_channel: Union[str, int]) -> bool:
+        """
+        检查消息是否已转发到指定目标频道
+
+        Args:
+            source_channel: 源频道标识符
             message_id: 消息ID
-            target_channels: 目标频道列表，为None时使用配置的默认目标
-            
+            target_channel: 目标频道标识符
+
         Returns:
-            Dict[str, Any]: 转发结果，包含成功和失败的目标频道信息
+            bool: 消息是否已转发到指定目标频道
         """
         pass
-    
+
     @abstractmethod
-    async def forward_media_group(self, source_channel: Union[str, int],
-                                message_id: int,
-                                target_channels: List[Union[str, int]] = None) -> Dict[str, Any]:
+    async def start_monitor(self, monitor_config: Dict[str, Any] = None) -> Dict[str, Any]:
         """
-        转发媒体组
-        
+        开始监听源频道，实时转发新消息
+
         Args:
-            source_channel: 源频道标识
-            message_id: 媒体组中任一消息ID
-            target_channels: 目标频道列表，为None时使用配置的默认目标
-            
-        Returns:
-            Dict[str, Any]: 转发结果，包含成功和失败的目标频道信息
-        """
-        pass
-        
-    @abstractmethod
-    async def forward_range(self, source_channel: Union[str, int],
-                          start_id: int,
-                          end_id: int,
-                          target_channels: List[Union[str, int]] = None) -> Dict[str, Any]:
-        """
-        转发一个范围内的消息
-        
-        Args:
-            source_channel: 源频道标识
-            start_id: 起始消息ID
-            end_id: 结束消息ID
-            target_channels: 目标频道列表，为None时使用配置的默认目标
-            
-        Returns:
-            Dict[str, Any]: 转发结果统计
-        """
-        pass
-    
-    @abstractmethod
-    async def forward_date_range(self, source_channel: Union[str, int],
-                               start_date: datetime,
-                               end_date: datetime,
-                               target_channels: List[Union[str, int]] = None) -> Dict[str, Any]:
-        """
-        转发指定日期范围内的消息
-        
-        Args:
-            source_channel: 源频道标识
-            start_date: 起始日期
-            end_date: 结束日期
-            target_channels: 目标频道列表，为None时使用配置的默认目标
-            
-        Returns:
-            Dict[str, Any]: 转发结果统计
-        """
-        pass
-    
-    @abstractmethod
-    async def get_forward_statistics(self, start_date: Optional[datetime] = None,
-                                   end_date: Optional[datetime] = None) -> Dict[str, Any]:
-        """
-        获取转发统计信息
-        
-        Args:
-            start_date: 开始日期，为None表示不限制
-            end_date: 结束日期，为None表示不限制
-            
-        Returns:
-            Dict[str, Any]: 统计信息
-        """
-        pass
-    
-    @abstractmethod
-    async def retry_failed_forward(self, task_id: str = None) -> Dict[str, Any]:
-        """
-        重试失败的转发任务
-        
-        Args:
-            task_id: 任务ID，为None时重试所有失败任务
-            
-        Returns:
-            Dict[str, Any]: 重试结果
-        """
-        pass
-    
-    @abstractmethod
-    async def start_forwarding(
-        self,
-        forward_config: Dict[str, Any] = None,
-        monitor_mode: bool = False
-    ) -> Dict[str, Any]:
-        """
-        启动转发服务
-        
-        Args:
-            forward_config: 转发配置，为None时使用默认配置
-            monitor_mode: 是否为监听模式，为True时使用monitor配置
-            
+            monitor_config: 监听配置，包含以下字段:
+                - monitor_channel_pairs: 源频道与目标频道的映射关系
+                - remove_captions: 是否移除原始消息的标题
+                - media_types: 需转发的媒体类型列表
+                - duration: 监听时长，格式为"年-月-日-时"，如"2025-3-28-1"
+                - forward_delay: 转发延迟（秒）
+                - max_retries: 失败后最大重试次数
+                - message_filter: 消息过滤器表达式（预留接口）
+                - add_watermark: 是否添加水印（预留接口）
+                - watermark_text: 水印文本（预留接口）
+                
         Returns:
             Dict[str, Any]: 启动结果
         """
         pass
-    
+
     @abstractmethod
-    async def stop_forwarding(self) -> Dict[str, Any]:
+    async def handle_new_message(self, message: Message) -> Dict[str, Any]:
         """
-        停止转发服务
-        
-        Returns:
-            Dict[str, Any]: 停止结果
-        """
-        pass
-    
-    @abstractmethod
-    def get_forwarding_status(self) -> Dict[str, Any]:
-        """
-        获取转发服务状态
-        
-        Returns:
-            Dict[str, Any]: 转发服务状态信息
-        """
-        pass
-        
-    @abstractmethod
-    async def start_monitor(
-        self,
-        monitor_config: Dict[str, Any] = None
-    ) -> Dict[str, Any]:
-        """
-        启动监听服务，实时监听源频道的新消息并转发到目标频道
-        
+        处理监听到的新消息
+
         Args:
-            monitor_config: 监听配置，为None时使用默认配置。配置应包含：
-                - channel_pairs: 源频道与目标频道的映射关系
-                - duration: 监听时长，格式为"年-月-日-时"，如"2025-3-28-1"
-                - remove_captions: 是否移除原始字幕
-                - media_types: 要转发的媒体类型列表
-                - forward_delay: 转发延迟（秒）
-                - max_retries: 失败后最大重试次数
-                - message_filter: 消息过滤器表达式
-            
+            message: 新消息
+
         Returns:
-            Dict[str, Any]: 启动结果，包含以下字段：
-                - success: 是否成功启动
-                - error: 如果失败，包含错误信息
-                - monitor_id: 监听任务ID
-                - start_time: 开始时间
-                - end_time: 预计结束时间（根据duration计算）
+            Dict[str, Any]: 处理结果
         """
         pass
-    
+
     @abstractmethod
-    async def stop_monitor(self) -> Dict[str, Any]:
+    def is_message_type_allowed(self, message: Message, allowed_types: List[str]) -> bool:
         """
-        停止监听服务
-        
+        检查消息类型是否在允许的类型列表中
+
+        Args:
+            message: 消息
+            allowed_types: 允许的类型列表
+
         Returns:
-            Dict[str, Any]: 停止结果，包含以下字段：
-                - success: 是否成功停止
-                - error: 如果失败，包含错误信息
-                - monitor_id: 监听任务ID
-                - duration: 实际监听时长（秒）
-                - messages_forwarded: 已转发的消息数量
+            bool: 消息类型是否允许
         """
         pass
-    
+
     @abstractmethod
-    def get_monitor_status(self) -> Dict[str, Any]:
+    async def is_channel_restricted(self, channel_id: Union[str, int]) -> bool:
         """
-        获取监听服务状态
-        
+        检查频道是否禁止转发
+
+        Args:
+            channel_id: 频道ID或用户名
+
         Returns:
-            Dict[str, Any]: 监听服务状态信息，包含以下字段：
-                - running: 是否正在运行
-                - start_time: 开始时间
-                - end_time: 预计结束时间
-                - remaining_time: 剩余时间（秒）
-                - messages_forwarded: 已转发的消息数量
-                - channel_pairs: 监听的频道对
-                - errors: 错误统计
+            bool: 频道是否禁止转发
+        """
+        pass
+
+    @abstractmethod
+    async def get_forwarding_stats(self) -> Dict[str, Any]:
+        """
+        获取转发统计信息
+
+        Returns:
+            Dict[str, Any]: 转发统计信息
         """
         pass 

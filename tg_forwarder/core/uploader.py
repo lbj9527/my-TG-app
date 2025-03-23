@@ -83,8 +83,8 @@ class Uploader(UploaderInterface):
             bool: 初始化是否成功
         """
         try:
-            # 创建上传信号量
-            max_concurrent_uploads = self._config.get_max_concurrent_uploads()
+            # 使用固定的并发上传数
+            max_concurrent_uploads = 2  # 使用固定值，不再从配置获取
             self._upload_semaphore = asyncio.Semaphore(max_concurrent_uploads)
             
             # 创建临时目录

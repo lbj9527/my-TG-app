@@ -32,6 +32,7 @@ from tg_forwarder.core.telegram_client import TelegramClient
 from tg_forwarder.core.downloader import Downloader
 from tg_forwarder.core.uploader import Uploader
 from tg_forwarder.core.forwarder import Forwarder
+from tg_forwarder.core.monitor_forwarder import MonitorForwarder
 from tg_forwarder.core.json_storage import JsonStorage
 from tg_forwarder.core.history_tracker import HistoryTracker
 from tg_forwarder.core.channel_utils import ChannelUtils
@@ -157,6 +158,7 @@ class Application(ApplicationInterface):
         self._downloader = None
         self._uploader = None
         self._forwarder = None
+        self._monitor_forwarder = None
         
         # 新增成员变量
         self._running = False
@@ -187,12 +189,18 @@ class Application(ApplicationInterface):
         try:
             # 加载配置
             try:
-                config_loaded = self._config.load_config()
-                if not config_loaded:
-                    self._app_logger.error("加载配置失败，应用无法初始化")
-                    # 但仍然继续初始化其他组件，设置配置有效性标志
-                    self._config_valid = False
+                # 先检查配置是否已经加载，避免重复加载
+                if not self._config.is_loaded():
+                    self._app_logger.info("开始加载配置文件...")
+                    config_loaded = self._config.load_config(verbose=True)
+                    if not config_loaded:
+                        self._app_logger.error("加载配置失败，应用无法初始化")
+                        # 但仍然继续初始化其他组件，设置配置有效性标志
+                        self._config_valid = False
+                    else:
+                        self._config_valid = True
                 else:
+                    self._app_logger.info("配置已加载，跳过加载步骤")
                     self._config_valid = True
             except Exception as e:
                 self._app_logger.error(f"加载配置时出错: {str(e)}")
@@ -283,18 +291,28 @@ class Application(ApplicationInterface):
                 # 初始化转发器
                 self._forwarder = Forwarder(
                     self._client,
-                    self._downloader,
-                    self._uploader,
-                    self._status_tracker,
-                    self._config,
-                    self._logger
+                    self._history_tracker,
+                    self._json_storage,
+                    self._logger,
+                    self._config.get_config_dict()
                 )
                 await self._forwarder.initialize()
+                
+                # 初始化监听转发器
+                self._monitor_forwarder = MonitorForwarder(
+                    self._client,
+                    self._history_tracker,
+                    self._json_storage,
+                    self._logger,
+                    self._config.get_config_dict()
+                )
+                await self._monitor_forwarder.initialize()
             else:
                 self._app_logger.warning("由于Telegram客户端未初始化，跳过下载器、上传器和转发器初始化")
                 self._downloader = None
                 self._uploader = None
                 self._forwarder = None
+                self._monitor_forwarder = None
             
             # 注册信号处理器
             self._register_signal_handlers()
@@ -988,71 +1006,57 @@ class Application(ApplicationInterface):
                 - message_filter: 消息过滤器表达式
             
         Returns:
-            Dict[str, Any]: 启动结果，包含以下字段：
-                - success: 是否成功启动
-                - error: 如果失败，包含错误信息
-                - monitor_id: 监听任务ID
-                - start_time: 开始时间
-                - end_time: 预计结束时间（根据duration计算）
+            Dict[str, Any]: 监听结果
         """
-        self._app_logger.info("开始启动监听服务")
-        
-        # 确保应用已初始化
         if not self._initialized:
-            await self.initialize()
-        
-        # 如果没有提供配置，使用默认配置
+            return {"success": False, "error": "应用未初始化"}
+            
+        # 使用特定的监听配置，否则使用默认配置
         if monitor_config is None:
+            # 从config获取监听配置
             monitor_config = self._config.get_monitor_config()
-            self._app_logger.info(f"使用默认监听配置: {monitor_config}")
+            
+        # 开启健康检查
+        await self.health_check()
         
-        # 验证频道对配置
-        channel_pairs = monitor_config.get("channel_pairs", {})
-        if not channel_pairs:
-            error_msg = "监听配置中缺少有效的频道对"
-            self._app_logger.error(error_msg)
-            return {
-                "success": False,
-                "error": error_msg
-            }
-        
-        # 确保频道对格式正确
-        try:
-            for source, targets in channel_pairs.items():
-                if not isinstance(source, (str, int)):
-                    raise ValueError(f"源频道格式不正确: {source}")
-                if not isinstance(targets, list):
-                    raise ValueError(f"目标频道必须是列表: {targets}")
-                if not targets:
-                    raise ValueError(f"源频道 {source} 没有指定目标频道")
-        except ValueError as e:
-            error_msg = f"监听配置验证失败: {str(e)}"
-            self._app_logger.error(error_msg)
-            return {
-                "success": False,
-                "error": error_msg
-            }
+        # 监听ID生成
+        monitor_id = f"mon_{int(time.time())}"
         
         # 启动监听
         try:
-            result = await self._forwarder.start_monitor(monitor_config)
+            # 使用专用的监听转发器而非普通转发器
+            result = await self._monitor_forwarder.start_monitoring(monitor_config)
             
             # 如果启动成功，记录监听状态
             if result.get("success", False):
-                self._app_logger.info(f"监听服务启动成功: {result.get('monitor_id', '')}")
-                self._monitor_status = {
+                self._monitor_status.update({
                     "running": True,
-                    "start_time": datetime.now(),
-                    "monitor_id": result.get("monitor_id", ""),
+                    "last_monitor_id": monitor_id,
+                    "start_time": time.time(),
+                    "messages_forwarded": 0,
                     "config": monitor_config
+                })
+                
+                # 触发监听开始事件
+                self._trigger_event("monitor_started", {
+                    "monitor_id": monitor_id,
+                    "config": monitor_config
+                })
+                
+                return {
+                    "success": True, 
+                    "monitor_id": monitor_id,
+                    "message": "监听服务已启动"
                 }
             else:
-                self._app_logger.error(f"监听服务启动失败: {result.get('error', '未知错误')}")
-            
-            return result
+                return {
+                    "success": False,
+                    "error": result.get("error", "未知错误")
+                }
+                
         except Exception as e:
-            error_msg = f"启动监听服务出错: {str(e)}"
-            self._app_logger.error(error_msg, exc_info=True)
+            error_msg = f"启动监听服务时出错: {str(e)}"
+            self._logger.error(error_msg)
             return {
                 "success": False,
                 "error": error_msg
@@ -1063,52 +1067,44 @@ class Application(ApplicationInterface):
         停止监听服务
         
         Returns:
-            Dict[str, Any]: 停止结果，包含以下字段：
-                - success: 是否成功停止
-                - error: 如果失败，包含错误信息
-                - monitor_id: 监听任务ID
-                - duration: 实际监听时长（秒）
-                - messages_forwarded: 已转发的消息数量
+            Dict[str, Any]: 停止结果
         """
-        self._app_logger.info("开始停止监听服务")
-        
-        # 检查监听服务是否在运行
-        if not hasattr(self, '_monitor_status') or not self._monitor_status or not self._monitor_status.get("running", False):
-            error_msg = "监听服务未在运行"
-            self._app_logger.warning(error_msg)
-            return {
-                "success": False,
-                "error": error_msg
-            }
-        
-        # 停止监听
+        if not self._initialized:
+            return {"success": False, "error": "应用未初始化"}
+            
+        # 如果监听未运行，直接返回
+        if not self._monitor_status.get("running", False):
+            return {"success": False, "error": "监听服务未运行"}
+            
         try:
-            result = await self._forwarder.stop_monitor()
+            # 停止监听
+            # 使用专用的监听转发器而非普通转发器
+            result = await self._monitor_forwarder.stop_monitoring()
             
-            # 如果停止成功，更新监听状态
-            if result.get("success", False):
-                self._app_logger.info(f"监听服务已停止: {result.get('monitor_id', '')}")
-                
-                # 计算持续时间
-                if "start_time" in self._monitor_status:
-                    duration = (datetime.now() - self._monitor_status["start_time"]).total_seconds()
-                    result["duration"] = duration
-                
-                # 重置监听状态
-                self._monitor_status = {
-                    "running": False,
-                    "end_time": datetime.now(),
-                    "last_monitor_id": self._monitor_status.get("monitor_id", ""),
-                    "last_duration": result.get("duration", 0),
-                    "messages_forwarded": result.get("messages_forwarded", 0)
-                }
-            else:
-                self._app_logger.error(f"停止监听服务失败: {result.get('error', '未知错误')}")
+            # 更新监听状态
+            messages_forwarded = self._monitor_status.get("messages_forwarded", 0)
+            monitor_id = self._monitor_status.get("last_monitor_id", "")
             
-            return result
+            self._monitor_status.update({
+                "running": False,
+                "messages_forwarded": 0
+            })
+            
+            # 触发监听停止事件
+            self._trigger_event("monitor_stopped", {
+                "monitor_id": monitor_id,
+                "messages_forwarded": messages_forwarded
+            })
+            
+            return {
+                "success": True,
+                "messages_forwarded": messages_forwarded,
+                "message": "监听服务已停止"
+            }
+            
         except Exception as e:
-            error_msg = f"停止监听服务出错: {str(e)}"
-            self._app_logger.error(error_msg, exc_info=True)
+            error_msg = f"停止监听服务时出错: {str(e)}"
+            self._logger.error(error_msg)
             return {
                 "success": False,
                 "error": error_msg
@@ -1119,41 +1115,24 @@ class Application(ApplicationInterface):
         获取监听服务状态
         
         Returns:
-            Dict[str, Any]: 监听服务状态信息，包含以下字段：
-                - running: 是否正在运行
-                - start_time: 开始时间
-                - end_time: 预计结束时间
-                - remaining_time: 剩余时间（秒）
-                - messages_forwarded: 已转发的消息数量
-                - channel_pairs: 监听的频道对
-                - errors: 错误统计
+            Dict[str, Any]: 监听状态
         """
-        # 如果应用未初始化或监听状态不存在，返回未运行状态
-        if not self._initialized or not hasattr(self, '_monitor_status') or not self._monitor_status:
-            return {
-                "running": False,
-                "message": "监听服务未初始化或未运行过"
-            }
+        # 如果监听状态指示服务正在运行，则需要验证实际状态
+        if self._monitor_status.get("running", False) and self._monitor_forwarder:
+            # 从监听转发器获取实际状态
+            forwarder_status = self._monitor_forwarder.get_monitoring_stats()
+            
+            # 如果转发器状态与缓存的状态不一致，则更新
+            if not forwarder_status.get("monitoring_active", False):
+                self._monitor_status["running"] = False
         
-        # 获取转发器中的实时状态
-        forwarder_status = self._forwarder.get_monitor_status()
-        
-        # 合并应用层和转发器层的状态
-        status = {
-            **self._monitor_status,
-            **forwarder_status
+        return {
+            "running": self._monitor_status.get("running", False),
+            "monitor_id": self._monitor_status.get("last_monitor_id", ""),
+            "start_time": self._monitor_status.get("start_time", 0),
+            "messages_forwarded": self._monitor_status.get("messages_forwarded", 0),
+            "config": self._monitor_status.get("config", {})
         }
-        
-        # 确保基本字段存在
-        status["running"] = status.get("running", False)
-        
-        # 格式化时间
-        if "start_time" in status and not isinstance(status["start_time"], str):
-            status["start_time"] = status["start_time"].isoformat()
-        if "end_time" in status and not isinstance(status["end_time"], str):
-            status["end_time"] = status["end_time"].isoformat()
-        
-        return status
     
     async def download_messages(self, download_config: Dict[str, Any] = None) -> Dict[str, Any]:
         """
