@@ -17,6 +17,8 @@ APP_ERROR = "app.error"            # 应用错误
 CONFIG_LOADED = "config.loaded"    # 配置加载完成
 CONFIG_CHANGED = "config.changed"  # 配置变更
 CONFIG_ERROR = "config.error"      # 配置错误
+CONFIG_GET_SECTION = "config.get_section"  # 获取配置区块
+CONFIG_SET_SECTION = "config.set_section"  # 设置配置区块
 
 # 插件相关事件
 PLUGIN_LOADED = "plugin.loaded"    # 插件加载
@@ -24,10 +26,13 @@ PLUGIN_UNLOADED = "plugin.unloaded"  # 插件卸载
 PLUGIN_ERROR = "plugin.error"      # 插件错误
 
 # Telegram客户端事件
-CLIENT_CONNECTING = "client.connecting"      # 客户端连接中
-CLIENT_CONNECTED = "client.connected"        # 客户端已连接
+CLIENT_CONNECT = "client.connect"          # 连接客户端请求
+CLIENT_DISCONNECT = "client.disconnect"    # 断开客户端请求
+CLIENT_CONNECTING = "client.connecting"    # 客户端连接中
+CLIENT_CONNECTED = "client.connected"      # 客户端已连接
 CLIENT_DISCONNECTED = "client.disconnected"  # 客户端断开连接
-CLIENT_ERROR = "client.error"                # 客户端错误
+CLIENT_ERROR = "client.error"              # 客户端错误
+CLIENT_GET_INSTANCE = "client.get_instance"  # 获取客户端实例请求
 
 # 消息事件
 MESSAGE_RECEIVED = "message.received"        # 收到消息
@@ -102,6 +107,8 @@ EVENT_CATEGORIES: Dict[str, EventCategory] = {
     CONFIG_LOADED: EventCategory.CONFIG,
     CONFIG_CHANGED: EventCategory.CONFIG,
     CONFIG_ERROR: EventCategory.CONFIG,
+    CONFIG_GET_SECTION: EventCategory.CONFIG,
+    CONFIG_SET_SECTION: EventCategory.CONFIG,
     
     # 插件事件
     PLUGIN_LOADED: EventCategory.PLUGIN,
@@ -109,10 +116,13 @@ EVENT_CATEGORIES: Dict[str, EventCategory] = {
     PLUGIN_ERROR: EventCategory.PLUGIN,
     
     # 客户端事件
+    CLIENT_CONNECT: EventCategory.CLIENT,
+    CLIENT_DISCONNECT: EventCategory.CLIENT,
     CLIENT_CONNECTING: EventCategory.CLIENT,
     CLIENT_CONNECTED: EventCategory.CLIENT,
     CLIENT_DISCONNECTED: EventCategory.CLIENT,
     CLIENT_ERROR: EventCategory.CLIENT,
+    CLIENT_GET_INSTANCE: EventCategory.CLIENT,
     
     # 消息事件
     MESSAGE_RECEIVED: EventCategory.MESSAGE,
