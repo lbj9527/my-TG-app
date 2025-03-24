@@ -39,6 +39,7 @@ MESSAGE_RECEIVED = "message.received"        # 收到消息
 MESSAGE_SENT = "message.sent"                # 发送消息
 MESSAGE_EDITED = "message.edited"            # 消息编辑
 MESSAGE_DELETED = "message.deleted"          # 消息删除
+MESSAGE_GET_FROM_CHANNEL = "message.get_from_channel"  # 从频道获取消息
 
 # 频道事件
 CHANNEL_JOINED = "channel.joined"            # 加入频道
@@ -46,6 +47,9 @@ CHANNEL_LEFT = "channel.left"                # 离开频道
 CHANNEL_CREATED = "channel.created"          # 创建频道
 CHANNEL_DELETED = "channel.deleted"          # 删除频道
 CHANNEL_UPDATED = "channel.updated"          # 频道更新
+CHANNEL_PARSE = "channel.parse"              # 解析频道
+CHANNEL_GET_INFO = "channel.get_info"        # 获取频道信息
+CHANNEL_CHECK_ACCESS = "channel.check_access"  # 检查频道访问权限
 
 # 转发事件
 FORWARD_STARTED = "forward.started"          # 开始转发
@@ -129,6 +133,7 @@ EVENT_CATEGORIES: Dict[str, EventCategory] = {
     MESSAGE_SENT: EventCategory.MESSAGE,
     MESSAGE_EDITED: EventCategory.MESSAGE,
     MESSAGE_DELETED: EventCategory.MESSAGE,
+    MESSAGE_GET_FROM_CHANNEL: EventCategory.MESSAGE,
     
     # 频道事件
     CHANNEL_JOINED: EventCategory.CHANNEL,
@@ -136,6 +141,9 @@ EVENT_CATEGORIES: Dict[str, EventCategory] = {
     CHANNEL_CREATED: EventCategory.CHANNEL,
     CHANNEL_DELETED: EventCategory.CHANNEL,
     CHANNEL_UPDATED: EventCategory.CHANNEL,
+    CHANNEL_PARSE: EventCategory.CHANNEL,
+    CHANNEL_GET_INFO: EventCategory.CHANNEL,
+    CHANNEL_CHECK_ACCESS: EventCategory.CHANNEL,
     
     # 转发事件
     FORWARD_STARTED: EventCategory.FORWARD,
